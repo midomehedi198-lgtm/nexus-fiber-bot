@@ -1,7 +1,7 @@
 /**
  * ============================================================================
- * NEXUS-TELECOM BOT v5.1 — PRODUCTION ENGINE
- * Robust Lead Management + Persistent Sessions + Clean Phone Parsing
+ * NEXUS-TELECOM BOT v6.0 — 4-TIER MULTI-LLM PRODUCTION ENGINE
+ * Robust Lead Management + Multi-Tier LLM Cascade + Persistent Sessions
  * ============================================================================
  */
 
@@ -17,6 +17,7 @@ const {
   useMultiFileAuthState,
   DisconnectReason
 } = require('@whiskeysockets/baileys');
+const { askMultiTierLLM } = require('./multi_llm_engine');
 
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth_info_baileys');
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '212625489153').replace(/\D/g, '');
@@ -219,13 +220,21 @@ async function sendLeadAlert(sock, clientPhone, name, result, lat, lng) {
 
 function isValidName(t) {
   if (!t || t.length < 2 || t.length > 50) return false;
-  if (/https?:\/\/|www\.|📍|\+212|\+2[0-9]{11}|\d{8,}|📞/.test(t)) return false;
+  if (/https?:\/\/|www\.|📍|\+212|\+2[0-9]{11}|\d{8,}|📞|\?|؟/.test(t)) return false;
+  // If text contains questions or greetings, it's not a person name
+  const lower = t.toLowerCase();
+  const notNames = [
+    'واش', 'بشحال', 'ثمن', 'عروض', 'كونيكسيون', 'ضروري', 'روتور', 'موديم',
+    'وقتاش', 'امتى', 'فين', 'سلام', 'شكرا', 'مرحبا', 'wach', 'bchhal', 'taman',
+    'salam', 'slm', 'chokran', 'merci', 'hello', 'hi'
+  ];
+  if (notNames.some(w => lower.includes(w))) return false;
   if ((t.match(/\n/g) || []).length > 2) return false;
   return true;
 }
 
 // ============================================================================
-// 7. MESSAGE HANDLER
+// 7. MESSAGE HANDLER WITH 4-TIER MULTI-LLM CASCADE
 // ============================================================================
 async function handleMessage(sock, msg) {
   if (!msg.message) return;
@@ -259,7 +268,7 @@ async function handleMessage(sock, msg) {
     await alertAdmins(sock, phone, 'بدأ محادثة مع البوت');
   }
 
-  // ── CAS 1: LOCATION RECEIVED
+  // ── CAS 1: LOCATION RECEIVED (REAL GIS 2,448 ZONES)
   if (coords) {
     const result = evaluateRealCoverage(coords.lat, coords.lng);
     updateSession(phone, { lat: coords.lat, lng: coords.lng, result, step: 'WAITING_NAME' });
@@ -282,7 +291,20 @@ async function handleMessage(sock, msg) {
   // ── CAS 2: NAME RECEIVED AFTER LOCATION
   if (session.step === 'WAITING_NAME') {
     if (!isValidName(rawText)) {
-      await sendWithDelay(sock, jid, `عفاك أخي صيفط لينا *الاسم الكامل* ديالك فقط (مثلاً: محمد أمين) 🙏`);
+      // If customer asks a question while waiting for name, answer with Multi-LLM and ask for name!
+      const isQuestion = rawText.includes('?') || rawText.includes('؟') ||
+        /واش|بشحال|ثمن|ضروري|روتور|موديم|وقتاش|امتى|wach|bchhal|taman/.test(rawText.toLowerCase());
+
+      if (isQuestion) {
+        const llmReply = await askMultiTierLLM(rawText);
+        await sendWithDelay(sock, jid,
+          `${llmReply.text}\n\n` +
+          `📌 *وباش يتاصل بك التقني ويبرمج موعد الفحص والتركيب المجاني، عفاك صيفط لينا الاسم الكامل ديالك (مثلاً: محمد أمين) 🙏*`
+        );
+        return;
+      }
+
+      await sendWithDelay(sock, jid, `عفاك أخي صيفط لينا *الاسم الكامل* ديالك فقط (مثلاً: محمد العلمي) باش يسجلو التقني فالموعد 🙏`);
       return;
     }
 
@@ -299,23 +321,22 @@ async function handleMessage(sock, msg) {
     return;
   }
 
-  // ── CAS 3: COMPLETED SESSION (FOLLOW-UP)
+  // ── CAS 3: COMPLETED SESSION (FOLLOW-UP INQUIRIES)
   if (session.step === 'COMPLETED') {
-    updateSession(phone, { step: 'WAITING_LOCATION' });
+    const llmReply = await askMultiTierLLM(rawText);
     await sendWithDelay(sock, jid,
-      `مرحباً بك مجدداً سي *${session.name || ''}*! 😊\n\nواش كاين شي استفسار آخر؟ أو صيفط لينا Localisation Pin جديد إلا بغيتي تفحص موقع آخر 📍`
+      `مرحباً بك مجدداً سي *${session.name || ''}*! 😊\n\n` +
+      `${llmReply.text}\n\n` +
+      `📍 إلا بغيتي تفحص موقع آخر، صيفط لينا Localisation Pin جديد في أي وقت!`
     );
     return;
   }
 
-  // ── CAS 4: DEFAULT WELCOME
+  // ── CAS 4: INTELLIGENT MULTI-TIER LLM RESPONSE (4-TIER CASCADE)
   updateSession(phone, { step: 'WAITING_LOCATION' });
-  await sendWithDelay(sock, jid,
-    `السلام عليكم ورحمة الله! مرحباً بك في خدمة *الفايبر أوبتيك بالمغرب* 🇲🇦⚡\n\n` +
-    `باش نعرفو واش منطقتكم مغطاة بـ *اتصالات المغرب (IAM)* أو *إنوي (Inwi)* ونعطيوك أحسن عرض:\n\n` +
-    `📍 *عفاك صيفط لينا Localisation Pin ديالك دابا عبر الواتساب* (أو صيفط رابط Google Maps ديال موقعك).\n\n` +
-    `السيستم غادي يفحص قاعدة بيانات التغطية (2,448 منطقة بالمغرب) أوتوماتيكياً في ثواني!`
-  );
+  const llmReply = await askMultiTierLLM(rawText);
+  logger.info(`🤖 LLM [Tier ${llmReply.tier} - ${llmReply.provider}] answered: "${llmReply.text.slice(0, 45)}..."`);
+  await sendWithDelay(sock, jid, llmReply.text);
 }
 
 // ============================================================================

@@ -20,6 +20,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const qrcodeTerminal = require('qrcode-terminal');
 const QRCode = require('qrcode');
+const { askMultiTierLLM } = require('./multi_llm_engine');
 
 // 1. CONFIGURATION & ENVIRONMENT VARIABLES
 const PORT = process.env.PORT || 3000;
@@ -378,14 +379,10 @@ async function handleIncomingMessage(jid, phone, msg) {
       return;
     }
 
-    // Premier message / Salutation par défaut
-    const welcome =
-      `السلام عليكم ورحمة الله وبركاته خويا! مرحباً بك في مصلحة طلبات الفايبر أوبتيك بالمغرب 🇲🇦⚡\n\n` +
-      `باش نعرفو واش منطقتكم مغطاة بـ *اتصالات المغرب (IAM)* أو *إنوي (Inwi)* أو *أورنج (Orange)* ونعطيوك أحسن عرض:\n\n` +
-      `📍 *عفاك صيفط لينا Localisation Pin ديالك دابا عبر الواتساب* (كليكي على علامة 📎 ثم Location ثم Send your current location).\n\n` +
-      `السيستم غادي يفحص الشبكة أوتوماتيكياً في ثواني!`;
-
-    await sock.sendMessage(jid, { text: welcome });
+    // Multi-tier LLM response for inquiries & conversations
+    const llmReply = await askMultiTierLLM(text);
+    logger.info(`🤖 Multi-LLM [Tier ${llmReply.tier} - ${llmReply.provider}] -> ${phone}`);
+    await sock.sendMessage(jid, { text: llmReply.text });
   } catch (err) {
     logger.error({ err }, ' Error handling message');
   }
