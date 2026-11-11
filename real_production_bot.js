@@ -5,6 +5,8 @@
  * ============================================================================
  */
 
+// Fix SSL inspection issues (corporate network / Zscaler / etc.)
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
@@ -15,6 +17,7 @@ const express = require('express');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
+  fetchLatestBaileysVersion,
   DisconnectReason
 } = require('@whiskeysockets/baileys');
 const { askMultiTierLLM } = require('./multi_llm_engine');
@@ -354,49 +357,95 @@ function checkInternet() {
 }
 
 // ============================================================================
-// 9. EXPRESS APP FOR RENDER HEALTH CHECKS
+// 9. EXPRESS APP — HEALTH + QR ENDPOINT FOR RENDER
 // ============================================================================
+const QRCode = require('qrcode');
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date() }));
-app.listen(PORT, '0.0.0.0', () => logger.info(`🌐 HTTP health server on port ${PORT}`));
+let currentQR = null;
+let botStatus = 'starting';
+
+app.get('/health', (req, res) => res.json({ status: botStatus, time: new Date() }));
+
+app.get('/qr', async (req, res) => {
+  if (botStatus === 'connected') {
+    return res.send(`<html><body style="font-family:sans-serif;text-align:center;background:#0a0;color:#fff;padding:40px">
+      <h1>✅ WhatsApp Connected!</h1><p>Bot is live and running 24/7.</p></body></html>`);
+  }
+  if (!currentQR) {
+    return res.send(`<html><head><meta http-equiv="refresh" content="4"></head>
+      <body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:40px">
+      <h2>⏳ Waiting for QR code...</h2><p>Status: ${botStatus}</p>
+      <p>Auto-refreshing every 4 seconds...</p></body></html>`);
+  }
+  try {
+    const qrDataUrl = await QRCode.toDataURL(currentQR, { width: 512, margin: 2 });
+    res.send(`<html><head><meta http-equiv="refresh" content="25"></head>
+      <body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:20px">
+      <h2>📱 Scan with WhatsApp</h2>
+      <p>Open WhatsApp → ⋮ → Linked Devices → Link a Device → Scan</p>
+      <img src="${qrDataUrl}" style="border:6px solid #fff;border-radius:12px;width:380px"/>
+      <p style="color:#aaa;font-size:13px">QR expires in ~20s — page auto-refreshes</p>
+      </body></html>`);
+  } catch (e) {
+    res.send('QR generation error: ' + e.message);
+  }
+});
+
+app.listen(PORT, '0.0.0.0', () => logger.info(`🌐 HTTP server on port ${PORT} — QR at /qr`));
 
 // ============================================================================
 // 10. MAIN BOT LOOP
 // ============================================================================
 async function startBot() {
-  logger.info('🚀 Nexus-Telecom Bot v5.1 starting...');
+  logger.info('🚀 Nexus-Telecom Bot v6.0 starting...');
+  botStatus = 'connecting';
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { version } = await fetchLatestBaileysVersion();
+  logger.info(`📦 Using WA Web version: ${version.join('.')}`);
 
   const sock = makeWASocket({
+    version,
     auth: state,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: ['Chrome (Linux)', '', ''],
-    connectTimeoutMs: 30000,
-    keepAliveIntervalMs: 15000,
+    browser: ['Windows', 'Chrome', '124.0.6367.82'],
+    connectTimeoutMs: 60000,
+    keepAliveIntervalMs: 25000,
+    retryRequestDelayMs: 3000,
   });
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      currentQR = qr;
+      botStatus = 'awaiting_scan';
+      logger.info('📸 QR ready — visit /qr to scan');
+    }
+
     if (connection === 'open') {
+      currentQR = null;
+      botStatus = 'connected';
       logger.info('🎉 NEXUS-TELECOM BOT IS LIVE AND CONNECTED 24/7! 🚀');
     }
 
     if (connection === 'close') {
+      currentQR = null;
       const code = lastDisconnect?.error?.output?.statusCode;
-      logger.warn(`⚠️ Disconnected [${code}]. Checking connection...`);
+      logger.warn(`⚠️ Disconnected [${code}]`);
 
-      if (code === DisconnectReason.loggedOut) {
-        logger.error('🔴 Logged out! Session needs re-linking.');
+      if (code === DisconnectReason.loggedOut || code === 403) {
+        logger.error('🔴 Logged out! Needs re-link at /qr');
+        botStatus = 'logged_out';
         process.exit(1);
       }
 
+      const delay = code === 500 ? 15000 : (code >= 400 ? 8000 : 3000);
       const hasNet = await checkInternet();
-      const delay = hasNet ? 3000 : 10000;
-      logger.info(`Reconnecting in ${delay / 1000}s (internet: ${hasNet})...`);
-      setTimeout(startBot, delay);
+      botStatus = 'reconnecting';
+      logger.info(`Reconnecting in ${delay / 1000}s (net: ${hasNet}, code: ${code})...`);
+      setTimeout(startBot, hasNet ? delay : 25000);
     }
   });
 

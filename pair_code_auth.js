@@ -2,6 +2,8 @@
  * PAIR CODE AUTH — بدل QR code نستعملو pairing code (8 أرقام)
  * أسهل بكثير — ما خاصكش تسكان QR، غير تدخل الكود في WhatsApp
  */
+// Fix SSL inspection issues on corporate networks
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 require('dotenv').config();
 const path = require('path');
 const {
@@ -26,10 +28,12 @@ async function startPairAuth() {
   const sock = makeWASocket({
     version,
     auth: state,
-    logger: pino({ level: 'silent' }),
+    logger: pino({ level: 'info' }),
     printQRInTerminal: false,
-    browser: ['Chrome (Linux)', 'Chrome', '120.0.0'],
+    browser: ['Windows', 'Chrome', '124.0.6367.82'],
     mobile: false,
+    connectTimeoutMs: 60000,
+    keepAliveIntervalMs: 30000,
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -58,15 +62,19 @@ async function startPairAuth() {
     }
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
-      console.log('Connection closed:', code);
+      console.log(`Connection closed: ${code} - ${lastDisconnect?.error?.message || ''}`);
       if (code === DisconnectReason.loggedOut) {
-        console.log('❌ Logged out. Clear auth_info_baileys and retry.');
+        console.log('❌ Logged out. Clear auth_info_baileys and restart.');
         process.exit(1);
       }
-      if (code !== 403) {
-        console.log('Retrying...');
-        setTimeout(startPairAuth, 5000);
+      // 401 after pairing code = code not entered yet, retry
+      // 403 = banned
+      if (code === 403) {
+        console.log('❌ Banned/Forbidden. This number cannot link more devices.');
+        process.exit(1);
       }
+      console.log('↩️  Retrying in 10s...');
+      setTimeout(startPairAuth, 10000);
     }
   });
 }
