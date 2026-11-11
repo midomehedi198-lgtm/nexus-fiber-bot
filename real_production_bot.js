@@ -14,6 +14,7 @@ const pino = require('pino');
 const turf = require('@turf/turf');
 const net = require('net');
 const express = require('express');
+const { MongoClient } = require('mongodb');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -23,6 +24,26 @@ const {
 const { askMultiTierLLM } = require('./multi_llm_engine');
 
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth_info_baileys');
+const MONGODB_URI = process.env.MONGODB_URI || '';
+
+// ============================================================================
+// MONGODB CONNECTION (shared)
+// ============================================================================
+let mongoDb = null;
+async function getDb() {
+  if (mongoDb) return mongoDb;
+  if (!MONGODB_URI) return null;
+  try {
+    const client = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 5000 });
+    await client.connect();
+    mongoDb = client.db('nexus_telecom');
+    logger_init.info('✅ MongoDB connected');
+  } catch (e) {
+    logger_init.warn('⚠️ MongoDB not available: ' + e.message);
+  }
+  return mongoDb;
+}
+const logger_init = pino({ level: 'info' });
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '212625489153').replace(/\D/g, '');
 const WASIT_PHONE = (process.env.WASIT_PHONE || '212699469649').replace(/\D/g, '');
 const BOT_PHONE   = (process.env.BOT_PHONE   || '212699469649').replace(/\D/g, '');
@@ -32,7 +53,7 @@ const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const botSentIds = new Set();
 
 // ============================================================================
-// 1. PERSISTENT SESSIONS (Saved to sessions.json so state is NEVER lost on reconnect)
+// 1. PERSISTENT SESSIONS — sessions.json + MongoDB backup
 // ============================================================================
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 let sessions = {};
@@ -40,19 +61,42 @@ try {
   if (fs.existsSync(SESSIONS_FILE)) {
     sessions = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
   }
-} catch (_) {
-  sessions = {};
+} catch (_) { sessions = {}; }
+
+// Load from MongoDB on startup (if available)
+async function loadSessionsFromMongo() {
+  const db = await getDb();
+  if (!db) return;
+  try {
+    const docs = await db.collection('sessions').find({}).toArray();
+    for (const doc of docs) {
+      const phone = doc._id;
+      if (!sessions[phone]) sessions[phone] = doc.data;
+    }
+    logger.info(`📦 MongoDB: loaded ${docs.length} sessions`);
+  } catch (e) {
+    logger.warn('MongoDB sessions load error: ' + e.message);
+  }
 }
 
 function saveSessions() {
+  try { fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2), 'utf8'); } catch (_) {}
+}
+
+async function saveSessionToMongo(phone, data) {
+  const db = await getDb();
+  if (!db) return;
   try {
-    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2), 'utf8');
+    await db.collection('sessions').updateOne(
+      { _id: phone },
+      { $set: { data, updatedAt: new Date() } },
+      { upsert: true }
+    );
   } catch (_) {}
 }
 
 function normalizePhone(jid) {
   if (!jid) return '';
-  // Remove @s.whatsapp.net, @lid, and any :device suffix (:0, :1, etc)
   return jid.split('@')[0].split(':')[0].replace(/\D/g, '');
 }
 
@@ -67,6 +111,7 @@ function getSession(phone) {
 function updateSession(phone, data) {
   sessions[phone] = { ...(sessions[phone] || {}), ...data, lastActivity: Date.now() };
   saveSessions();
+  saveSessionToMongo(phone, sessions[phone]); // async, non-blocking
   return sessions[phone];
 }
 
@@ -217,6 +262,24 @@ async function sendLeadAlert(sock, clientPhone, name, result, lat, lng) {
       logger.info(`📨 Lead alert sent to ${r}`);
     } catch (e) {
       logger.warn(`Alert failed for ${r}: ${e.message}`);
+    }
+  }
+
+  // ✅ Save lead to MongoDB
+  const db = await getDb();
+  if (db) {
+    try {
+      await db.collection('leads').insertOne({
+        phone: clientPhone,
+        name,
+        location: { lat, lng, link },
+        coverage: result,
+        createdAt: new Date(),
+        status: 'new'
+      });
+      logger.info(`💾 Lead saved to MongoDB: ${clientPhone}`);
+    } catch (e) {
+      logger.warn('MongoDB lead save error: ' + e.message);
     }
   }
 }
@@ -458,3 +521,6 @@ async function startBot() {
 }
 
 startBot();
+
+// Load MongoDB sessions on startup (non-blocking)
+loadSessionsFromMongo().catch(() => {});
