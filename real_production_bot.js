@@ -566,7 +566,7 @@ async function startBot() {
     auth: state,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: Browsers.macOS('Desktop'),
+    browser: ['Chrome (Linux)', '', ''],
     connectTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
     retryRequestDelayMs: 3000,
@@ -594,7 +594,6 @@ async function startBot() {
     }
 
     if (connection === 'close') {
-      currentQR = null;
       currentPairCode = null;
       const code = lastDisconnect?.error?.output?.statusCode;
       logger.warn(`⚠️ Disconnected [${code}]`);
