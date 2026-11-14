@@ -28,9 +28,17 @@ const ADMIN_PHONE = (process.env.ADMIN_PHONE || '212625489153').replace(/\D/g, '
 const WASIT_PHONE = (process.env.WASIT_PHONE || '212699469649').replace(/\D/g, '');
 const BOT_PHONE   = (process.env.BOT_PHONE   || '212699469649').replace(/\D/g, '');
 
-const KNOWN_ADMINS = new Set([ADMIN_PHONE, WASIT_PHONE, BOT_PHONE, '220358196113553']);
+const KNOWN_ADMINS = new Set([ADMIN_PHONE, WASIT_PHONE, BOT_PHONE, '220358196113553', '74415442260055']);
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const botSentIds = new Set();
+const logBuffer = [];
+
+function recordLog(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  logBuffer.push(line);
+  if (logBuffer.length > 200) logBuffer.shift();
+  logger.info(msg);
+}
 
 // ============================================================================
 // 1. PERSISTENT SESSIONS
@@ -161,23 +169,76 @@ function extractCoords(msg) {
 }
 
 // ============================================================================
-// 5. SEND HELPERS
+// 5. SEND HELPERS WITH TRIPLE FALLBACK DELIVERY
 // ============================================================================
-async function sendWithDelay(sock, jid, text) {
+async function safeReply(sock, msg, text) {
+  const rawJid = msg.key?.remoteJid;
+  if (!rawJid) return null;
+
   try {
-    await sock.sendPresenceUpdate('composing', jid);
-    await new Promise(r => setTimeout(r, 2500));
-    await sock.sendPresenceUpdate('paused', jid);
+    await sock.sendPresenceUpdate('composing', rawJid);
+    await new Promise(r => setTimeout(r, 1200));
+    await sock.sendPresenceUpdate('paused', rawJid);
   } catch (_) {}
-  const sent = await sock.sendMessage(jid, { text });
-  if (sent?.key?.id) botSentIds.add(sent.key.id);
-  return sent;
+
+  // 1. Direct send with quoted context
+  try {
+    const sent = await sock.sendMessage(rawJid, { text }, { quoted: msg });
+    if (sent?.key?.id) botSentIds.add(sent.key.id);
+    recordLog(`✅ Delivered quoted to ${rawJid}`);
+    return sent;
+  } catch (e1) {
+    recordLog(`⚠️ Quoted send failed to ${rawJid}: ${e1.message}`);
+  }
+
+  // 2. Direct send without quoted context
+  try {
+    const sent = await sock.sendMessage(rawJid, { text });
+    if (sent?.key?.id) botSentIds.add(sent.key.id);
+    recordLog(`✅ Delivered unquoted to ${rawJid}`);
+    return sent;
+  } catch (e2) {
+    recordLog(`⚠️ Unquoted send failed to ${rawJid}: ${e2.message}`);
+  }
+
+  // 3. If senderPn is present (LID user phone number)
+  if (msg.key?.senderPn) {
+    try {
+      const pnJid = `${msg.key.senderPn}@s.whatsapp.net`;
+      const sent = await sock.sendMessage(pnJid, { text });
+      if (sent?.key?.id) botSentIds.add(sent.key.id);
+      recordLog(`✅ Delivered to senderPn ${pnJid}`);
+      return sent;
+    } catch (e3) {
+      recordLog(`⚠️ senderPn delivery failed: ${e3.message}`);
+    }
+  }
+
+  // 4. Fallback: normalized phone number JID
+  const phone = normalizePhone(rawJid);
+  if (phone && phone.length >= 9 && phone.length <= 15) {
+    try {
+      const sJid = `${phone}@s.whatsapp.net`;
+      const sent = await sock.sendMessage(sJid, { text });
+      if (sent?.key?.id) botSentIds.add(sent.key.id);
+      recordLog(`✅ Delivered to sJid ${sJid}`);
+      return sent;
+    } catch (e4) {
+      recordLog(`❌ All delivery methods failed for ${rawJid}: ${e4.message}`);
+    }
+  }
+  return null;
 }
 
 async function sendNow(sock, jid, text) {
-  const sent = await sock.sendMessage(jid, { text });
-  if (sent?.key?.id) botSentIds.add(sent.key.id);
-  return sent;
+  try {
+    const sent = await sock.sendMessage(jid, { text });
+    if (sent?.key?.id) botSentIds.add(sent.key.id);
+    return sent;
+  } catch (e) {
+    recordLog(`SendNow failed for ${jid}: ${e.message}`);
+    return null;
+  }
 }
 
 // ============================================================================
@@ -210,9 +271,9 @@ async function sendLeadAlert(sock, clientPhone, name, result, lat, lng) {
   for (const r of [...new Set([ADMIN_PHONE, WASIT_PHONE])]) {
     try {
       await sendNow(sock, `${r}@s.whatsapp.net`, msg);
-      logger.info(`📨 Lead alert sent to ${r}`);
+      recordLog(`📨 Lead alert sent to ${r}`);
     } catch (e) {
-      logger.warn(`Alert failed for ${r}: ${e.message}`);
+      recordLog(`Alert failed for ${r}: ${e.message}`);
     }
   }
 }
@@ -239,27 +300,33 @@ async function handleMessage(sock, msg) {
   if (botSentIds.has(msg.key?.id)) return;
 
   const rawJid = msg.key?.remoteJid;
-  if (!rawJid || rawJid.includes('@g.us') || rawJid === 'status@broadcast') return;
+  if (!rawJid) return;
+
+  // STRICT 1-ON-1 FILTER: Ignore all groups, newsletters, status broadcasts
+  if (msg.key.participant || rawJid.includes('@g.us') || rawJid.includes('@newsletter') || rawJid.includes('@broadcast') || rawJid === 'status@broadcast') {
+    return;
+  }
   if (msg.key.fromMe) return;
 
   const phone = normalizePhone(rawJid);
   if (!phone) return;
 
-  // IMPORTANT: Always reply to the exact rawJid where message came from!
-  const jid = rawJid;
   const isAdmin = KNOWN_ADMINS.has(phone);
-
   const coords = extractCoords(msg.message);
   const rawText = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
 
-  logger.info(`📥 [${phone}${isAdmin ? ' (ADMIN)' : ''}] text="${rawText.slice(0, 30)}" coords=${!!coords}`);
+  recordLog(`📥 [${phone}${isAdmin ? ' (ADMIN)' : ''}] text="${rawText.slice(0, 30)}" coords=${!!coords}`);
 
   const session = getSession(phone);
-  const isNew = session.step === 'IDLE';
 
-  // Only alert admins for real clients, not during admin tests
-  if (isNew && !coords && !isAdmin) {
-    await alertAdmins(sock, phone, 'بدأ محادثة مع البوت');
+  // Debounced alert for new clients: at most once every 2 hours per client, never for admins
+  const now = Date.now();
+  if (!session.lastAlert || (now - session.lastAlert > 7200000)) {
+    if (!coords && !isAdmin) {
+      session.lastAlert = now;
+      saveSessions();
+      await alertAdmins(sock, phone, 'بدأ محادثة مع البوت');
+    }
   }
 
   // ── CAS 1: LOCATION RECEIVED (REAL GIS 2,448 ZONES)
@@ -278,7 +345,7 @@ async function handleMessage(sock, msg) {
       updateSession(phone, { step: 'IDLE' });
       reply = `للأسف أخاي، موقعك حالياً بعيد على شبكة الفايبر المتوفرة (${result.distanceMeters}م) ⏳\n\nقيدت رقمك (+${phone}) وغادي تكون أول من نعلموه إن شاء الله أول ما يدوز الكابلاج لحيكم 🙏`;
     }
-    await sendWithDelay(sock, jid, reply);
+    await safeReply(sock, msg, reply);
     return;
   }
 
@@ -290,14 +357,14 @@ async function handleMessage(sock, msg) {
 
       if (isQuestion) {
         const llmReply = await askMultiTierLLM(rawText);
-        await sendWithDelay(sock, jid,
+        await safeReply(sock, msg,
           `${llmReply.text}\n\n` +
           `📌 *وباش يتاصل بك التقني ويبرمج موعد الفحص والتركيب المجاني، عفاك صيفط لينا الاسم الكامل ديالك (مثلاً: محمد أمين) 🙏*`
         );
         return;
       }
 
-      await sendWithDelay(sock, jid, `عفاك أخي صيفط لينا *الاسم الكامل* ديالك فقط (مثلاً: محمد العلمي) باش يسجلو التقني فالموعد 🙏`);
+      await safeReply(sock, msg, `عفاك أخي صيفط لينا *الاسم الكامل* ديالك فقط (مثلاً: محمد العلمي) باش يسجلو التقني فالموعد 🙏`);
       return;
     }
 
@@ -308,16 +375,16 @@ async function handleMessage(sock, msg) {
       `غادي يتاصل بك التقني المعتمد ديال (*${session.result?.operator || 'IAM / Inwi'}*) في أقرب وقت لتحديد موعد التركيب المجاني والروتور 🚀.\n\n` +
       `شكراً على ثقتك بنا 🤝!`;
 
-    await sendWithDelay(sock, jid, confirmMsg);
+    await safeReply(sock, msg, confirmMsg);
     await sendLeadAlert(sock, phone, rawText, session.result, session.lat, session.lng);
-    logger.info(`✅ LEAD CONFIRMED: ${rawText} | +${phone} | ${session.result?.zoneName}`);
+    recordLog(`✅ LEAD CONFIRMED: ${rawText} | +${phone} | ${session.result?.zoneName}`);
     return;
   }
 
   // ── CAS 3: COMPLETED SESSION
   if (session.step === 'COMPLETED') {
     const llmReply = await askMultiTierLLM(rawText);
-    await sendWithDelay(sock, jid,
+    await safeReply(sock, msg,
       `مرحباً بك مجدداً سي *${session.name || ''}*! 😊\n\n` +
       `${llmReply.text}\n\n` +
       `📍 إلا بغيتي تفحص موقع آخر، صيفط لينا Localisation Pin جديد في أي وقت!`
@@ -328,8 +395,8 @@ async function handleMessage(sock, msg) {
   // ── CAS 4: INTELLIGENT MULTI-TIER LLM RESPONSE (4-TIER CASCADE)
   updateSession(phone, { step: 'WAITING_LOCATION' });
   const llmReply = await askMultiTierLLM(rawText);
-  logger.info(`🤖 LLM [Tier ${llmReply.tier} - ${llmReply.provider}] answered: "${llmReply.text.slice(0, 45)}..."`);
-  await sendWithDelay(sock, jid, llmReply.text);
+  recordLog(`🤖 LLM [Tier ${llmReply.tier} - ${llmReply.provider}] answered: "${llmReply.text.slice(0, 45)}..."`);
+  await safeReply(sock, msg, llmReply.text);
 }
 
 // ============================================================================
@@ -357,6 +424,10 @@ let currentPairCode = null;
 let botStatus = 'starting';
 
 app.get('/health', (req, res) => res.json({ status: botStatus, time: new Date() }));
+
+app.get('/logs', (req, res) => {
+  res.type('text/plain').send(logBuffer.slice(-100).join('\n') || 'No logs recorded yet');
+});
 
 app.get('/code', async (req, res) => {
   if (botStatus === 'connected') {
