@@ -423,9 +423,63 @@ const QRCode = require('qrcode');
 const app = express();
 const PORT = process.env.PORT || 3000;
 let currentQR = null;
+let currentSock = null;
+let currentPairCode = null;
 let botStatus = 'starting';
 
 app.get('/health', (req, res) => res.json({ status: botStatus, time: new Date() }));
+
+app.get('/code', async (req, res) => {
+  if (botStatus === 'connected') {
+    return res.send(`<html><body style="font-family:sans-serif;text-align:center;background:#0a0;color:#fff;padding:40px">
+      <h1>✅ WhatsApp Connected!</h1><p>Bot is live and running 24/7.</p></body></html>`);
+  }
+  const phone = (req.query.phone || BOT_PHONE).replace(/\D/g, '');
+  if (!currentSock) {
+    return res.send('<html><body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:40px"><h2>⏳ Socket is starting... Refresh in 3 seconds.</h2></body></html>');
+  }
+  try {
+    if (!currentPairCode) {
+      currentPairCode = await currentSock.requestPairingCode(phone);
+      logger.info(`🔑 PAIRING CODE GENERATED FOR +${phone}: ${currentPairCode}`);
+    }
+    return res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Nexus Fiber Bot — Pairing Code</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font-family:system-ui,-apple-system,sans-serif;text-align:center;background:#0d1117;color:#f0f6fc;padding:28px 16px;margin:0">
+  <h2 style="color:#2ea043;margin:8px 0">🔑 كود الربط عبر رقم الهاتف (Pairing Code)</h2>
+  <p style="color:#8b949e;margin:6px 0 24px 0">بدون كاميرا وبدون مسح الـ QR</p>
+
+  <div style="background:#161b22;border:2px solid #30363d;padding:24px 32px;border-radius:16px;display:inline-block;margin:12px auto">
+    <div style="font-size:14px;color:#8b949e;margin-bottom:8px">رقم هاتف البوت: +${phone}</div>
+    <div style="font-size:38px;font-weight:bold;letter-spacing:6px;color:#58a6ff;font-family:monospace;background:#0d1117;padding:12px 24px;border-radius:10px;border:1px dashed #58a6ff">
+      ${currentPairCode}
+    </div>
+  </div>
+
+  <div style="max-width:440px;margin:24px auto;text-align:right;background:#161b22;padding:20px;border-radius:12px;border:1px solid #30363d">
+    <h4 style="margin:0 0 12px 0;color:#58a6ff">📱 الخطوات في هاتف الواتساب:</h4>
+    <ol style="margin:0;padding-right:20px;line-height:1.8;color:#c9d1d9">
+      <li>افتح تطبيق <b>WhatsApp</b></li>
+      <li>سير لـ: <b>الأجهزة المرتبطة</b> (Linked Devices) ⬅️ <b>ربط جهاز</b></li>
+      <li>اضغط على <b>"ربط برقم الهاتف بدلاً من ذلك"</b> (Link with phone number instead) في الأسفل</li>
+      <li>أدخل الكود الموضح أعلاه: <b style="color:#58a6ff">${currentPairCode}</b></li>
+    </ol>
+  </div>
+</body>
+</html>`);
+  } catch (e) {
+    logger.error('Pairing code error: ' + e.message);
+    res.send(`<html><body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:40px">
+      <h2 style="color:#f85149">⚠️ Pairing Error: ${e.message}</h2>
+      <p><a href="/code" style="color:#58a6ff">إعادة المحاولة</a> | <a href="/qr" style="color:#58a6ff">الرجوع للـ QR</a></p>
+    </body></html>`);
+  }
+});
 
 app.get('/qr', async (req, res) => {
   if (botStatus === 'connected') {
@@ -436,7 +490,9 @@ app.get('/qr', async (req, res) => {
     return res.send(`<html><head><meta http-equiv="refresh" content="4"></head>
       <body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:40px">
       <h2>⏳ Waiting for QR code...</h2><p>Status: ${botStatus}</p>
-      <p>Auto-refreshing every 4 seconds...</p></body></html>`);
+      <p>Auto-refreshing every 4 seconds...</p>
+      <p><a href="/code" style="color:#58a6ff;text-decoration:none">👉 أو جرب الربط بالكود (Pairing Code)</a></p>
+      </body></html>`);
   }
   try {
     const qrDataUrl = await QRCode.toDataURL(currentQR, { width: 380, margin: 3, errorCorrectionLevel: 'M' });
@@ -454,6 +510,12 @@ app.get('/qr', async (req, res) => {
   
   <div style="background:#ffffff;padding:20px;border-radius:20px;display:inline-block;box-shadow:0 12px 40px rgba(0,0,0,0.6)">
     <img src="${qrDataUrl}" alt="WhatsApp QR Code" style="width:280px;height:280px;display:block" />
+  </div>
+
+  <div style="margin-top:24px">
+    <a href="/code" style="display:inline-block;background:#238636;color:#ffffff;padding:12px 24px;border-radius:10px;text-decoration:none;font-weight:600;font-size:15px">
+      🔑 اضغط هنا للربط بالكود (Pairing Code) بدون كاميرا
+    </a>
   </div>
 
   <p style="color:#8b949e;font-size:12px;margin:18px 0 0 0">
@@ -488,6 +550,7 @@ async function startBot() {
     keepAliveIntervalMs: 25000,
     retryRequestDelayMs: 3000,
   });
+  currentSock = sock;
 
   sock.ev.on('creds.update', saveCreds);
 
@@ -506,6 +569,7 @@ async function startBot() {
 
     if (connection === 'close') {
       currentQR = null;
+      currentPairCode = null;
       const code = lastDisconnect?.error?.output?.statusCode;
       logger.warn(`⚠️ Disconnected [${code}]`);
 
