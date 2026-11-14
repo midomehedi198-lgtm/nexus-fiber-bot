@@ -1,11 +1,10 @@
 /**
  * ============================================================================
- * NEXUS-TELECOM BOT v6.0 — 4-TIER MULTI-LLM PRODUCTION ENGINE
- * Robust Lead Management + Multi-Tier LLM Cascade + Persistent Sessions
+ * NEXUS-TELECOM BOT v6.5 — ROCK-SOLID PRODUCTION ENGINE
+ * Robust Lead Management + 4-Tier LLM + Persistent GitHub Sync
  * ============================================================================
  */
 
-// Fix SSL inspection issues (corporate network / Zscaler / etc.)
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 require('dotenv').config();
 const path = require('path');
@@ -14,38 +13,17 @@ const pino = require('pino');
 const turf = require('@turf/turf');
 const net = require('net');
 const express = require('express');
-const { MongoClient } = require('mongodb');
+const QRCode = require('qrcode');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  DisconnectReason,
-  Browsers
+  DisconnectReason
 } = require('@whiskeysockets/baileys');
 const { askMultiTierLLM } = require('./multi_llm_engine');
 const { restoreSessionFromGitHub, saveSessionToGitHub } = require('./github_session_sync');
 
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth_info_baileys');
-const MONGODB_URI = process.env.MONGODB_URI || '';
-
-// ============================================================================
-// MONGODB CONNECTION (shared)
-// ============================================================================
-let mongoDb = null;
-async function getDb() {
-  if (mongoDb) return mongoDb;
-  if (!MONGODB_URI) return null;
-  try {
-    const client = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 5000 });
-    await client.connect();
-    mongoDb = client.db('nexus_telecom');
-    logger_init.info('✅ MongoDB connected');
-  } catch (e) {
-    logger_init.warn('⚠️ MongoDB not available: ' + e.message);
-  }
-  return mongoDb;
-}
-const logger_init = pino({ level: 'info' });
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '212625489153').replace(/\D/g, '');
 const WASIT_PHONE = (process.env.WASIT_PHONE || '212699469649').replace(/\D/g, '');
 const BOT_PHONE   = (process.env.BOT_PHONE   || '212699469649').replace(/\D/g, '');
@@ -55,7 +33,7 @@ const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const botSentIds = new Set();
 
 // ============================================================================
-// 1. PERSISTENT SESSIONS — sessions.json + MongoDB backup
+// 1. PERSISTENT SESSIONS
 // ============================================================================
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 let sessions = {};
@@ -65,36 +43,8 @@ try {
   }
 } catch (_) { sessions = {}; }
 
-// Load from MongoDB on startup (if available)
-async function loadSessionsFromMongo() {
-  const db = await getDb();
-  if (!db) return;
-  try {
-    const docs = await db.collection('sessions').find({}).toArray();
-    for (const doc of docs) {
-      const phone = doc._id;
-      if (!sessions[phone]) sessions[phone] = doc.data;
-    }
-    logger.info(`📦 MongoDB: loaded ${docs.length} sessions`);
-  } catch (e) {
-    logger.warn('MongoDB sessions load error: ' + e.message);
-  }
-}
-
 function saveSessions() {
   try { fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2), 'utf8'); } catch (_) {}
-}
-
-async function saveSessionToMongo(phone, data) {
-  const db = await getDb();
-  if (!db) return;
-  try {
-    await db.collection('sessions').updateOne(
-      { _id: phone },
-      { $set: { data, updatedAt: new Date() } },
-      { upsert: true }
-    );
-  } catch (_) {}
 }
 
 function normalizePhone(jid) {
@@ -113,7 +63,6 @@ function getSession(phone) {
 function updateSession(phone, data) {
   sessions[phone] = { ...(sessions[phone] || {}), ...data, lastActivity: Date.now() };
   saveSessions();
-  saveSessionToMongo(phone, sessions[phone]); // async, non-blocking
   return sessions[phone];
 }
 
@@ -217,7 +166,7 @@ function extractCoords(msg) {
 async function sendWithDelay(sock, jid, text) {
   try {
     await sock.sendPresenceUpdate('composing', jid);
-    await new Promise(r => setTimeout(r, 4000));
+    await new Promise(r => setTimeout(r, 2500));
     await sock.sendPresenceUpdate('paused', jid);
   } catch (_) {}
   const sent = await sock.sendMessage(jid, { text });
@@ -266,35 +215,16 @@ async function sendLeadAlert(sock, clientPhone, name, result, lat, lng) {
       logger.warn(`Alert failed for ${r}: ${e.message}`);
     }
   }
-
-  // ✅ Save lead to MongoDB
-  const db = await getDb();
-  if (db) {
-    try {
-      await db.collection('leads').insertOne({
-        phone: clientPhone,
-        name,
-        location: { lat, lng, link },
-        coverage: result,
-        createdAt: new Date(),
-        status: 'new'
-      });
-      logger.info(`💾 Lead saved to MongoDB: ${clientPhone}`);
-    } catch (e) {
-      logger.warn('MongoDB lead save error: ' + e.message);
-    }
-  }
 }
 
 function isValidName(t) {
   if (!t || t.length < 2 || t.length > 50) return false;
   if (/https?:\/\/|www\.|📍|\+212|\+2[0-9]{11}|\d{8,}|📞|\?|؟/.test(t)) return false;
-  // If text contains questions or greetings, it's not a person name
   const lower = t.toLowerCase();
   const notNames = [
     'واش', 'بشحال', 'ثمن', 'عروض', 'كونيكسيون', 'ضروري', 'روتور', 'موديم',
     'وقتاش', 'امتى', 'فين', 'سلام', 'شكرا', 'مرحبا', 'wach', 'bchhal', 'taman',
-    'salam', 'slm', 'chokran', 'merci', 'hello', 'hi'
+    'salam', 'slm', 'chokran', 'merci', 'hello', 'hi', 'cv'
   ];
   if (notNames.some(w => lower.includes(w))) return false;
   if ((t.match(/\n/g) || []).length > 2) return false;
@@ -302,7 +232,7 @@ function isValidName(t) {
 }
 
 // ============================================================================
-// 7. MESSAGE HANDLER WITH 4-TIER MULTI-LLM CASCADE
+// 7. MESSAGE HANDLER WITH RAW JID SUPPORT (@s.whatsapp.net & @lid)
 // ============================================================================
 async function handleMessage(sock, msg) {
   if (!msg.message) return;
@@ -315,7 +245,7 @@ async function handleMessage(sock, msg) {
   const phone = normalizePhone(rawJid);
   if (!phone) return;
 
-  // Always reply to the sender's actual JID (supports @s.whatsapp.net and modern @lid)
+  // IMPORTANT: Always reply to the exact rawJid where message came from!
   const jid = rawJid;
   const isAdmin = KNOWN_ADMINS.has(phone);
 
@@ -327,7 +257,7 @@ async function handleMessage(sock, msg) {
   const session = getSession(phone);
   const isNew = session.step === 'IDLE';
 
-  // Only alert admins for real clients, not when admin is testing
+  // Only alert admins for real clients, not during admin tests
   if (isNew && !coords && !isAdmin) {
     await alertAdmins(sock, phone, 'بدأ محادثة مع البوت');
   }
@@ -355,7 +285,6 @@ async function handleMessage(sock, msg) {
   // ── CAS 2: NAME RECEIVED AFTER LOCATION
   if (session.step === 'WAITING_NAME') {
     if (!isValidName(rawText)) {
-      // If customer asks a question while waiting for name, answer with Multi-LLM and ask for name!
       const isQuestion = rawText.includes('?') || rawText.includes('؟') ||
         /واش|بشحال|ثمن|ضروري|روتور|موديم|وقتاش|امتى|wach|bchhal|taman/.test(rawText.toLowerCase());
 
@@ -385,7 +314,7 @@ async function handleMessage(sock, msg) {
     return;
   }
 
-  // ── CAS 3: COMPLETED SESSION (FOLLOW-UP INQUIRIES)
+  // ── CAS 3: COMPLETED SESSION
   if (session.step === 'COMPLETED') {
     const llmReply = await askMultiTierLLM(rawText);
     await sendWithDelay(sock, jid,
@@ -418,9 +347,8 @@ function checkInternet() {
 }
 
 // ============================================================================
-// 9. EXPRESS APP — HEALTH + QR ENDPOINT FOR RENDER
+// 9. EXPRESS APP — HEALTH + QR + PAIRING CODE ENDPOINTS
 // ============================================================================
-const QRCode = require('qrcode');
 const app = express();
 const PORT = process.env.PORT || 3000;
 let currentQR = null;
@@ -430,19 +358,6 @@ let botStatus = 'starting';
 
 app.get('/health', (req, res) => res.json({ status: botStatus, time: new Date() }));
 
-app.get('/reset', (req, res) => {
-  try {
-    if (fs.existsSync(AUTH_DIR)) {
-      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-    }
-    fs.mkdirSync(AUTH_DIR, { recursive: true });
-    res.send('<h1>✅ Auth cleared! Regenerating QR in 2s...</h1><meta http-equiv="refresh" content="2;url=/qr">');
-    setTimeout(startBot, 2000);
-  } catch (e) {
-    res.send('Reset error: ' + e.message);
-  }
-});
-
 app.get('/code', async (req, res) => {
   if (botStatus === 'connected') {
     return res.send(`<html><body style="font-family:sans-serif;text-align:center;background:#0a0;color:#fff;padding:40px">
@@ -450,7 +365,7 @@ app.get('/code', async (req, res) => {
   }
   const phone = (req.query.phone || BOT_PHONE).replace(/\D/g, '');
   if (!currentSock) {
-    return res.send('<html><body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:40px"><h2>⏳ Socket is starting... Refresh in 3 seconds.</h2></body></html>');
+    return res.send('<html><head><meta http-equiv="refresh" content="3"></head><body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:40px"><h2>⏳ Starting socket... Auto-refreshing in 3s</h2></body></html>');
   }
   try {
     if (!currentPairCode) {
@@ -487,11 +402,8 @@ app.get('/code', async (req, res) => {
 </body>
 </html>`);
   } catch (e) {
-    logger.error('Pairing code error: ' + e.message);
-    res.send(`<html><body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:40px">
-      <h2 style="color:#f85149">⚠️ Pairing Error: ${e.message}</h2>
-      <p><a href="/code" style="color:#58a6ff">إعادة المحاولة</a> | <a href="/qr" style="color:#58a6ff">الرجوع للـ QR</a></p>
-    </body></html>`);
+    res.send(`<html><head><meta http-equiv="refresh" content="4"></head><body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:40px">
+      <h2>⏳ Refreshing connection...</h2><p>${e.message}</p></body></html>`);
   }
 });
 
@@ -501,15 +413,15 @@ app.get('/qr', async (req, res) => {
       <h1>✅ WhatsApp Connected!</h1><p>Bot is live and running 24/7.</p></body></html>`);
   }
   if (!currentQR) {
-    return res.send(`<html><head><meta http-equiv="refresh" content="4"></head>
+    return res.send(`<html><head><meta http-equiv="refresh" content="3"></head>
       <body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:40px">
       <h2>⏳ Waiting for QR code...</h2><p>Status: ${botStatus}</p>
-      <p>Auto-refreshing every 4 seconds...</p>
-      <p><a href="/code" style="color:#58a6ff;text-decoration:none">👉 أو جرب الربط بالكود (Pairing Code)</a></p>
+      <p>Auto-refreshing in 3 seconds...</p>
+      <p style="margin-top:20px"><a href="/code" style="color:#58a6ff;font-size:16px;text-decoration:none">👉 أو جرب الربط بالكود (Pairing Code) من هنا</a></p>
       </body></html>`);
   }
   try {
-    const qrDataUrl = await QRCode.toDataURL(currentQR, { width: 380, margin: 3, errorCorrectionLevel: 'M' });
+    const qrDataUrl = await QRCode.toDataURL(currentQR, { width: 512, margin: 2 });
     res.send(`<!DOCTYPE html>
 <html>
 <head>
@@ -523,12 +435,12 @@ app.get('/qr', async (req, res) => {
   <p style="font-size:14px;color:#8b949e;margin:0 0 20px 0">افتح WhatsApp ⬅️ الأجهزة المرتبطة ⬅️ ربط جهاز ⬅️ وجه الكاميرا</p>
   
   <div style="background:#ffffff;padding:20px;border-radius:20px;display:inline-block;box-shadow:0 12px 40px rgba(0,0,0,0.6)">
-    <img src="${qrDataUrl}" alt="WhatsApp QR Code" style="width:280px;height:280px;display:block" />
+    <img src="${qrDataUrl}" alt="WhatsApp QR Code" style="width:320px;height:320px;display:block" />
   </div>
 
   <div style="margin-top:24px">
     <a href="/code" style="display:inline-block;background:#238636;color:#ffffff;padding:12px 24px;border-radius:10px;text-decoration:none;font-weight:600;font-size:15px">
-      🔑 اضغط هنا للربط بالكود (Pairing Code) بدون كاميرا
+      🔑 أو اضغط هنا للربط بالكود (Pairing Code) بدون كاميرا
     </a>
   </div>
 
@@ -538,17 +450,17 @@ app.get('/qr', async (req, res) => {
 </body>
 </html>`);
   } catch (e) {
-    res.send('QR generation error: ' + e.message);
+    res.send('QR error: ' + e.message);
   }
 });
 
-app.listen(PORT, '0.0.0.0', () => logger.info(`🌐 HTTP server on port ${PORT} — QR at /qr`));
+app.listen(PORT, '0.0.0.0', () => logger.info(`🌐 HTTP server listening on port ${PORT}`));
 
 // ============================================================================
-// 10. MAIN BOT LOOP
+// 10. MAIN BOT LOOP WITH 100% PERSISTENT GITHUB CLOUD RESTORE
 // ============================================================================
 async function startBot() {
-  logger.info('🚀 Nexus-Telecom Bot v6.0 starting...');
+  logger.info('🚀 Nexus-Telecom Bot starting...');
   botStatus = 'connecting';
 
   // 1. AUTO-RESTORE SESSION FROM GITHUB CLOUD (max 3s timeout)
@@ -566,20 +478,17 @@ async function startBot() {
   try {
     const v = await Promise.race([
       fetchLatestBaileysVersion(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('version timeout')), 4000))
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
     ]);
     waVersion = v?.version;
-    if (waVersion) logger.info(`📦 Using WA Web version: ${waVersion.join('.')}`);
-  } catch (_) {
-    logger.info('📦 Using built-in Baileys default version');
-  }
+  } catch (_) {}
 
   const sock = makeWASocket({
     ...(waVersion ? { version: waVersion } : {}),
     auth: state,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: ['Chrome (Linux)', '', ''],
+    browser: ['Windows', 'Chrome', '124.0.6367.82'],
     connectTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
     retryRequestDelayMs: 3000,
@@ -595,21 +504,20 @@ async function startBot() {
     if (qr) {
       currentQR = qr;
       botStatus = 'awaiting_scan';
-      logger.info('📸 QR ready — visit /qr to scan');
+      logger.info('📸 Fresh QR generated — available at /qr');
     }
 
     if (connection === 'open') {
       currentQR = null;
       botStatus = 'connected';
       logger.info('🎉 NEXUS-TELECOM BOT IS LIVE AND CONNECTED 24/7! 🚀');
-      // Ensure session bundle is safely persisted in GitHub cloud
       saveSessionToGitHub(AUTH_DIR).catch(() => {});
     }
 
     if (connection === 'close') {
       currentPairCode = null;
       const code = lastDisconnect?.error?.output?.statusCode;
-      logger.warn(`⚠️ Disconnected [${code}]`);
+      logger.warn(`⚠️ Disconnected [${code}]. Checking connection...`);
 
       if (code === DisconnectReason.loggedOut || code === 403) {
         logger.warn('🔴 Logged out / 403. Refreshing auth for clean link...');
@@ -622,11 +530,10 @@ async function startBot() {
         return;
       }
 
-      const delay = code === 500 ? 15000 : (code >= 400 ? 8000 : 3000);
+      const delay = code === 500 ? 10000 : (code >= 400 ? 6000 : 3000);
       const hasNet = await checkInternet();
       botStatus = 'reconnecting';
-      logger.info(`Reconnecting in ${delay / 1000}s (net: ${hasNet}, code: ${code})...`);
-      setTimeout(startBot, hasNet ? delay : 25000);
+      setTimeout(startBot, hasNet ? delay : 15000);
     }
   });
 
@@ -639,6 +546,3 @@ async function startBot() {
 }
 
 startBot();
-
-// Load MongoDB sessions on startup (non-blocking)
-loadSessionsFromMongo().catch(() => {});
