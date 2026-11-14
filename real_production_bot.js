@@ -429,6 +429,19 @@ let botStatus = 'starting';
 
 app.get('/health', (req, res) => res.json({ status: botStatus, time: new Date() }));
 
+app.get('/reset', (req, res) => {
+  try {
+    if (fs.existsSync(AUTH_DIR)) {
+      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+    }
+    fs.mkdirSync(AUTH_DIR, { recursive: true });
+    res.send('<h1>✅ Auth cleared! Restarting in 2s...</h1><meta http-equiv="refresh" content="2;url=/qr">');
+    setTimeout(() => process.exit(1), 1000);
+  } catch (e) {
+    res.send('Reset error: ' + e.message);
+  }
+});
+
 app.get('/code', async (req, res) => {
   if (botStatus === 'connected') {
     return res.send(`<html><body style="font-family:sans-serif;text-align:center;background:#0a0;color:#fff;padding:40px">
