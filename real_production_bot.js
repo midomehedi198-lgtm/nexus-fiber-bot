@@ -442,13 +442,13 @@ app.get('/qr', async (req, res) => {
       <p>Auto-refreshing every 4 seconds...</p></body></html>`);
   }
   try {
-    const qrDataUrl = await QRCode.toDataURL(currentQR, { width: 512, margin: 2 });
+    const qrDataUrl = await QRCode.toDataURL(currentQR, { width: 280, margin: 1 });
     res.send(`<html><head><meta http-equiv="refresh" content="25"></head>
-      <body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:20px">
-      <h2>📱 Scan with WhatsApp</h2>
-      <p>Open WhatsApp → ⋮ → Linked Devices → Link a Device → Scan</p>
-      <img src="${qrDataUrl}" style="border:6px solid #fff;border-radius:12px;width:380px"/>
-      <p style="color:#aaa;font-size:13px">QR expires in ~20s — page auto-refreshes</p>
+      <body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:16px">
+      <h3 style="margin:8px 0">📱 Scan with WhatsApp</h3>
+      <p style="font-size:12px;margin:4px 0;color:#ccc">Settings → Linked Devices → Link a Device → Scan</p>
+      <img src="${qrDataUrl}" style="border:4px solid #fff;border-radius:8px;width:220px;display:block;margin:10px auto"/>
+      <p style="color:#888;font-size:11px;margin:6px 0">Auto-refreshes every 25s</p>
       </body></html>`);
   } catch (e) {
     res.send('QR generation error: ' + e.message);
