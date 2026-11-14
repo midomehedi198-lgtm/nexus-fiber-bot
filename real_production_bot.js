@@ -472,6 +472,20 @@ async function startBot() {
     ]).catch(() => {});
   }
 
+  // Clean up any incomplete or unregistered local auth so Baileys generates a fresh QR cleanly
+  const localCredsPath = path.join(AUTH_DIR, 'creds.json');
+  if (fs.existsSync(localCredsPath)) {
+    try {
+      const c = JSON.parse(fs.readFileSync(localCredsPath, 'utf8'));
+      if (!c.registered) {
+        logger.warn('⚠️ Local creds exist but registered is false. Cleaning up auth dir for fresh QR...');
+        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+      }
+    } catch (_) {
+      try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch (_) {}
+    }
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
   let waVersion;

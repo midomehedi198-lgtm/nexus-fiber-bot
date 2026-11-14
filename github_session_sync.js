@@ -90,6 +90,18 @@ async function restoreSessionFromGitHub(authDir) {
       return false;
     }
 
+    // Verify that creds is actually registered (not an uncompleted pairing attempt)
+    try {
+      const credsObj = JSON.parse(Buffer.from(bundle['creds.json'], 'base64').toString('utf8'));
+      if (!credsObj.registered) {
+        console.warn('⚠️ GitHub session creds.registered is not true. Discarding incomplete session.');
+        return false;
+      }
+    } catch (_) {
+      console.warn('⚠️ GitHub session creds could not be parsed.');
+      return false;
+    }
+
     if (!fs.existsSync(authDir)) {
       fs.mkdirSync(authDir, { recursive: true });
     }
@@ -117,7 +129,17 @@ async function saveSessionToGitHub(authDir) {
   if (!fs.existsSync(authDir)) return;
 
   const credsPath = path.join(authDir, 'creds.json');
-  if (!fs.existsSync(credsPath)) return; // Don't save empty/unauthenticated dir
+  if (!fs.existsSync(credsPath)) return; // Don't save empty dir
+
+  try {
+    const credsObj = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
+    if (!credsObj.registered) {
+      // Never save unregistered/half-baked sessions!
+      return;
+    }
+  } catch (_) {
+    return;
+  }
 
   isSaving = true;
   try {
