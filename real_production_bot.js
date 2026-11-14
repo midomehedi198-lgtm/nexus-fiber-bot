@@ -23,6 +23,7 @@ const {
   Browsers
 } = require('@whiskeysockets/baileys');
 const { askMultiTierLLM } = require('./multi_llm_engine');
+const { restoreSessionFromGitHub, saveSessionToGitHub } = require('./github_session_sync');
 
 const AUTH_DIR = process.env.AUTH_DIR || path.join(__dirname, 'auth_info_baileys');
 const MONGODB_URI = process.env.MONGODB_URI || '';
@@ -549,6 +550,13 @@ app.listen(PORT, '0.0.0.0', () => logger.info(`🌐 HTTP server on port ${PORT} 
 async function startBot() {
   logger.info('🚀 Nexus-Telecom Bot v6.0 starting...');
   botStatus = 'connecting';
+
+  // 1. AUTO-RESTORE SESSION FROM GITHUB CLOUD (Prevents QR re-scans across restarts)
+  if (!fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
+    logger.info('📦 Local auth empty. Checking GitHub cloud for saved session...');
+    await restoreSessionFromGitHub(AUTH_DIR);
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
   logger.info(`📦 Using WA Web version: ${version.join('.')}`);
@@ -565,7 +573,10 @@ async function startBot() {
   });
   currentSock = sock;
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    saveSessionToGitHub(AUTH_DIR).catch(() => {});
+  });
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
@@ -578,6 +589,8 @@ async function startBot() {
       currentQR = null;
       botStatus = 'connected';
       logger.info('🎉 NEXUS-TELECOM BOT IS LIVE AND CONNECTED 24/7! 🚀');
+      // Ensure session bundle is safely persisted in GitHub cloud
+      saveSessionToGitHub(AUTH_DIR).catch(() => {});
     }
 
     if (connection === 'close') {
