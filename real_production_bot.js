@@ -19,7 +19,8 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  DisconnectReason
+  DisconnectReason,
+  Browsers
 } = require('@whiskeysockets/baileys');
 const { askMultiTierLLM } = require('./multi_llm_engine');
 
@@ -438,14 +439,28 @@ app.get('/qr', async (req, res) => {
       <p>Auto-refreshing every 4 seconds...</p></body></html>`);
   }
   try {
-    const qrDataUrl = await QRCode.toDataURL(currentQR, { width: 280, margin: 1 });
-    res.send(`<html><head><meta http-equiv="refresh" content="25"></head>
-      <body style="font-family:sans-serif;text-align:center;background:#111;color:#fff;padding:16px">
-      <h3 style="margin:8px 0">📱 Scan with WhatsApp</h3>
-      <p style="font-size:12px;margin:4px 0;color:#ccc">Settings → Linked Devices → Link a Device → Scan</p>
-      <img src="${qrDataUrl}" style="border:4px solid #fff;border-radius:8px;width:220px;display:block;margin:10px auto"/>
-      <p style="color:#888;font-size:11px;margin:6px 0">Auto-refreshes every 25s</p>
-      </body></html>`);
+    const qrDataUrl = await QRCode.toDataURL(currentQR, { width: 380, margin: 3, errorCorrectionLevel: 'M' });
+    res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Nexus Fiber Bot — WhatsApp Scan</title>
+  <meta http-equiv="refresh" content="20">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font-family:system-ui,-apple-system,sans-serif;text-align:center;background:#0d1117;color:#f0f6fc;padding:24px;margin:0">
+  <h2 style="margin:12px 0 6px 0;color:#2ea043">🟢 Nexus Fiber Bot — WhatsApp Link</h2>
+  <p style="font-size:14px;color:#8b949e;margin:0 0 20px 0">افتح WhatsApp ⬅️ الأجهزة المرتبطة ⬅️ ربط جهاز ⬅️ وجه الكاميرا</p>
+  
+  <div style="background:#ffffff;padding:20px;border-radius:20px;display:inline-block;box-shadow:0 12px 40px rgba(0,0,0,0.6)">
+    <img src="${qrDataUrl}" alt="WhatsApp QR Code" style="width:280px;height:280px;display:block" />
+  </div>
+
+  <p style="color:#8b949e;font-size:12px;margin:18px 0 0 0">
+    ⚡ كيتجدد تلقائياً كل 20 ثانية للحفاظ على صلاحية الربط.
+  </p>
+</body>
+</html>`);
   } catch (e) {
     res.send('QR generation error: ' + e.message);
   }
@@ -468,7 +483,7 @@ async function startBot() {
     auth: state,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: ['Windows', 'Chrome', '124.0.6367.82'],
+    browser: Browsers.macOS('Desktop'),
     connectTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
     retryRequestDelayMs: 3000,
