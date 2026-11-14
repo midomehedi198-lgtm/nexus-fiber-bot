@@ -49,7 +49,7 @@ const ADMIN_PHONE = (process.env.ADMIN_PHONE || '212625489153').replace(/\D/g, '
 const WASIT_PHONE = (process.env.WASIT_PHONE || '212699469649').replace(/\D/g, '');
 const BOT_PHONE   = (process.env.BOT_PHONE   || '212699469649').replace(/\D/g, '');
 
-const KNOWN_ADMINS = new Set([ADMIN_PHONE, WASIT_PHONE, BOT_PHONE]);
+const KNOWN_ADMINS = new Set([ADMIN_PHONE, WASIT_PHONE, BOT_PHONE, '220358196113553']);
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const botSentIds = new Set();
 
@@ -314,8 +314,8 @@ async function handleMessage(sock, msg) {
   const phone = normalizePhone(rawJid);
   if (!phone) return;
 
-  // Clean canonical JID
-  const jid = `${phone}@s.whatsapp.net`;
+  // Always reply to the sender's actual JID (supports @s.whatsapp.net and modern @lid)
+  const jid = rawJid;
   const isAdmin = KNOWN_ADMINS.has(phone);
 
   const coords = extractCoords(msg.message);
