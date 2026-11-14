@@ -436,8 +436,8 @@ app.get('/reset', (req, res) => {
       fs.rmSync(AUTH_DIR, { recursive: true, force: true });
     }
     fs.mkdirSync(AUTH_DIR, { recursive: true });
-    res.send('<h1>✅ Auth cleared! Restarting in 2s...</h1><meta http-equiv="refresh" content="2;url=/qr">');
-    setTimeout(() => process.exit(1), 1000);
+    res.send('<h1>✅ Auth cleared! Regenerating QR in 2s...</h1><meta http-equiv="refresh" content="2;url=/qr">');
+    setTimeout(startBot, 2000);
   } catch (e) {
     res.send('Reset error: ' + e.message);
   }
@@ -600,9 +600,14 @@ async function startBot() {
       logger.warn(`⚠️ Disconnected [${code}]`);
 
       if (code === DisconnectReason.loggedOut || code === 403) {
-        logger.error('🔴 Logged out! Needs re-link at /qr');
-        botStatus = 'logged_out';
-        process.exit(1);
+        logger.warn('🔴 Logged out / 403. Refreshing auth for clean link...');
+        botStatus = 'awaiting_scan';
+        try {
+          if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+          fs.mkdirSync(AUTH_DIR, { recursive: true });
+        } catch (_) {}
+        setTimeout(startBot, 3000);
+        return;
       }
 
       const delay = code === 500 ? 15000 : (code >= 400 ? 8000 : 3000);
