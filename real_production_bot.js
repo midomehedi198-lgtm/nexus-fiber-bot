@@ -551,18 +551,31 @@ async function startBot() {
   logger.info('🚀 Nexus-Telecom Bot v6.0 starting...');
   botStatus = 'connecting';
 
-  // 1. AUTO-RESTORE SESSION FROM GITHUB CLOUD (Prevents QR re-scans across restarts)
+  // 1. AUTO-RESTORE SESSION FROM GITHUB CLOUD (max 3s timeout)
   if (!fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
     logger.info('📦 Local auth empty. Checking GitHub cloud for saved session...');
-    await restoreSessionFromGitHub(AUTH_DIR);
+    await Promise.race([
+      restoreSessionFromGitHub(AUTH_DIR),
+      new Promise(r => setTimeout(r, 3000))
+    ]).catch(() => {});
   }
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-  const { version } = await fetchLatestBaileysVersion();
-  logger.info(`📦 Using WA Web version: ${version.join('.')}`);
+
+  let waVersion;
+  try {
+    const v = await Promise.race([
+      fetchLatestBaileysVersion(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('version timeout')), 4000))
+    ]);
+    waVersion = v?.version;
+    if (waVersion) logger.info(`📦 Using WA Web version: ${waVersion.join('.')}`);
+  } catch (_) {
+    logger.info('📦 Using built-in Baileys default version');
+  }
 
   const sock = makeWASocket({
-    version,
+    ...(waVersion ? { version: waVersion } : {}),
     auth: state,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
