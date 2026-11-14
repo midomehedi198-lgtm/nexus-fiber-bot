@@ -322,15 +322,11 @@ async function handleMessage(sock, msg) {
 
   logger.info(`📥 [${phone}${isAdmin ? ' (ADMIN)' : ''}] text="${rawText.slice(0, 30)}" coords=${!!coords}`);
 
-  if (isAdmin) {
-    logger.info(`👑 Admin message from ${phone} — ignored.`);
-    return;
-  }
-
   const session = getSession(phone);
   const isNew = session.step === 'IDLE';
 
-  if (isNew && !coords) {
+  // Only alert admins for real clients, not when admin is testing
+  if (isNew && !coords && !isAdmin) {
     await alertAdmins(sock, phone, 'بدأ محادثة مع البوت');
   }
 
