@@ -309,7 +309,11 @@ async function handleMessage(sock, msg) {
   if (msg.key.participant || rawJid.includes('@g.us') || rawJid.includes('@newsletter') || rawJid.includes('@broadcast') || rawJid === 'status@broadcast') {
     return;
   }
-  if (msg.key.fromMe) return;
+  if (msg.key.fromMe) {
+    // Allow self-testing in "Message Yourself" chat if not sent by bot itself
+    const isSelfChat = rawJid.includes(BOT_PHONE) || rawJid.includes(WASIT_PHONE);
+    if (!isSelfChat) return;
+  }
 
   const phone = normalizePhone(rawJid);
   if (!phone) return;
@@ -595,23 +599,23 @@ async function startBot() {
     if (qr) {
       currentQR = qr;
       botStatus = 'awaiting_scan';
-      logger.info('📸 Fresh QR generated — available at /qr');
+      recordLog('📸 QR code generated — available at /qr');
     }
 
     if (connection === 'open') {
       currentQR = null;
       botStatus = 'connected';
-      logger.info('🎉 NEXUS-TELECOM BOT IS LIVE AND CONNECTED 24/7! 🚀');
+      recordLog('🎉 WhatsApp connection OPEN and live 24/7!');
       saveSessionToGitHub(AUTH_DIR).catch(() => {});
     }
 
     if (connection === 'close') {
       currentPairCode = null;
       const code = lastDisconnect?.error?.output?.statusCode;
-      logger.warn(`⚠️ Disconnected [${code}]. Checking connection...`);
+      recordLog(`⚠️ Connection closed [code: ${code}]. Reconnecting...`);
 
       if (code === DisconnectReason.loggedOut || code === 403) {
-        logger.warn('🔴 Logged out / 403. Refreshing auth for clean link...');
+        recordLog('🔴 Logged out / 403. Refreshing auth for clean link...');
         botStatus = 'awaiting_scan';
         try {
           if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
@@ -637,10 +641,12 @@ async function startBot() {
     }
   });
 
-  sock.ev.on('messages.upsert', async ({ messages }) => {
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
     for (const msg of messages) {
+      const rawText = msg.message?.conversation || msg.message?.extendedTextMessage?.text || (msg.message?.locationMessage ? '[LOCATION]' : '');
+      recordLog(`📨 Upsert [${type}]: jid=${msg.key?.remoteJid} fromMe=${msg.key?.fromMe} text="${(rawText || '').slice(0, 30)}"`);
       try { await handleMessage(sock, msg); }
-      catch (e) { logger.error(`Handler error: ${e.message}`); }
+      catch (e) { recordLog(`❌ Handler error: ${e.message}`); }
     }
   });
 }
