@@ -166,34 +166,25 @@ function queryTier4(text) {
 
 // ─── MASTER CASCADE FUNCTION ──────────────────────────────────────────────────
 async function askMultiTierLLM(userText) {
-  const t = (userText || '').toLowerCase();
+  const t = (userText || '').toLowerCase().trim();
 
-  // FAQ shortcut: instant deterministic response (zero latency)
-  const isFaq = /كونيكسيون|connexion|ضروري|بشحال|ثمن|100 ميغا|200 ميغا|روتور|موديم|تركيب|وقتاش|امتى|تغطية/.test(t);
-  if (isFaq) {
-    return { text: queryTier4(userText), tier: 4, provider: 'Instant FAQ Shield' };
+  // 1. INSTANT SALES SHIELD (0ms latency, 100% Moroccan Darija, zero external dependencies)
+  // Handles greetings, pricing, router, installation, coverage, timing, and ADSL inquiries
+  const isDirectMatch =
+    /سلام|slm|salam|salut|hello|hi|bonjour|marhaba|مرحبا|اهلين|أهلا|cv|labas|لاباس|فينك|finak|kidayr|هيلو|hallo|alo|الو|كونيكسيون|connexion|ضروري|قديمة|واش خاصو|adsl|بشحال|ثمن|taman|prix|عروض|عقد|offre|100|200|ميغا|mega|flous|شحال|combien|bchhal|روتور|موديم|modem|routeur|تركيب|فابور|مجاني|gratuit|installation|تغطية|coverage|واصل|كاين|واش كاينة|واش كاين|inwi|iam|اتصالات|شبكة|réseau|تقني|technicien|وقتاش|امتى|متى|موعد|rendez|wqtach/.test(t);
+
+  if (isDirectMatch) {
+    return { text: queryTier4(userText), tier: 4, provider: 'Instant Darija Shield' };
   }
 
-  // Tier 1: Llama 3.3 70B — fast, free, great Darija/Arabic
+  // 2. Pollinations Cloud AI for any open/unusual question (fast 2.5s timeout)
   try {
-    const t1 = await queryTier1(userText);
-    return { text: t1, tier: 1, provider: 'Llama 3.3 70B (OpenRouter)' };
+    const tCloud = await queryTier3(userText, 2500);
+    return { text: tCloud, tier: 3, provider: 'Pollinations Cloud AI' };
   } catch (_) {}
 
-  // Tier 2: Llama 4 Maverick — alternative free model
-  try {
-    const t2 = await queryTier2(userText);
-    return { text: t2, tier: 2, provider: 'Llama 4 Maverick (OpenRouter)' };
-  } catch (_) {}
-
-  // Tier 3: Pollinations AI free cloud
-  try {
-    const t3 = await queryTier3(userText);
-    return { text: t3, tier: 3, provider: 'Pollinations AI' };
-  } catch (_) {}
-
-  // Tier 4: Deterministic shield — never fails
-  return { text: queryTier4(userText), tier: 4, provider: 'Deterministic Shield' };
+  // 3. Fallback to Darija Sales Shield (100% guarantee)
+  return { text: queryTier4(userText), tier: 4, provider: 'Deterministic Darija Shield' };
 }
 
 module.exports = { askMultiTierLLM, queryTier4 };
