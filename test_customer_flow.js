@@ -21,6 +21,10 @@ async function main() {
     botSentIds: new Set(), recordLog() {}, setTimeout: (callback, delay) => { delays.push(delay); callback(); },
     Promise, ADMIN_PHONE: '212600000000', saveSessions() {}, askMultiTierLLM: engine.askMultiTierLLM
   };
+  context.boundedSend = operation => operation;
+  context.rememberSent = sent => { if (sent?.key?.id) context.botSentIds.add(sent.key.id); };
+  context.normalizePhone = jid => jid.split('@')[0];
+  context.adminChatAddresses = new Map();
   vm.createContext(context);
   vm.runInContext(
     section('async function safeReply(', '// ============================================================================\n// 6.') +
@@ -69,6 +73,9 @@ async function main() {
   const before = delays.length;
   await context.safeReply(presenceFailure, msg, 'test', '212611111111');
   assert.equal(delays[before], 5000, 'delay still applies when presence fails');
+  context.adminChatAddresses.set('212600000000', 'admin-test@lid');
+  await context.sendNow(sock, '212600000000@s.whatsapp.net', 'admin notification');
+  assert.equal(sent.at(-1).jid, 'admin-test@lid', 'admin alerts use observed inbound address');
   console.log('PASS: Arabic/Latin intents, unknown escalation, single reply, admin handoff, debounce, failed alert retry.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

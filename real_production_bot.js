@@ -54,6 +54,26 @@ function resolveClientPhone(rawJid, msg) {
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const botSentIds = new Set();
+const sentMessages = new Map();
+const chatQueues = new Map();
+const adminChatAddresses = new Map();
+
+function rememberSent(sent) {
+  if (!sent?.key?.id) return;
+  botSentIds.add(sent.key.id);
+  if (sent.message) sentMessages.set(sent.key.id, sent.message);
+  // Bound caches while retaining messages for WhatsApp decryption retries.
+  while (botSentIds.size > 2000) botSentIds.delete(botSentIds.values().next().value);
+  while (sentMessages.size > 2000) sentMessages.delete(sentMessages.keys().next().value);
+}
+
+function boundedSend(operation, timeoutMs = 12000) {
+  let timer;
+  return Promise.race([
+    operation,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Send acknowledgement timeout; delivery unknown')), timeoutMs); })
+  ]).finally(() => clearTimeout(timer));
+}
 const logBuffer = [];
 
 function recordLog(msg) {
@@ -213,20 +233,21 @@ async function safeReply(sock, msg, text, targetPhone) {
   // Reply in the authenticated inbound conversation, including LID addresses.
   if (rawJid) {
     try {
-      const sent = await sock.sendMessage(rawJid, { text }, { quoted: msg });
-      if (sent?.key?.id) botSentIds.add(sent.key.id);
+      const sent = await boundedSend(sock.sendMessage(rawJid, { text }, { quoted: msg }));
+      rememberSent(sent);
       recordLog(`📤 Reply accepted in original chat; id=${sent?.key?.id || 'unknown'} (delivery pending)`);
       delivered = true;
     } catch (e1) {
       recordLog(`⚠️ Original chat send failed: ${e1.message}`);
+      if (e1.message.includes('delivery unknown')) return false;
     }
   }
 
   // Fall back to a resolved phone only when the original chat send fails.
   if (!delivered && pnJid && pnJid !== rawJid) {
     try {
-      const sent = await sock.sendMessage(pnJid, { text });
-      if (sent?.key?.id) botSentIds.add(sent.key.id);
+      const sent = await boundedSend(sock.sendMessage(pnJid, { text }));
+      rememberSent(sent);
       recordLog(`📤 Phone fallback accepted; id=${sent?.key?.id || 'unknown'} (delivery pending)`);
       delivered = true;
     } catch (e2) {
@@ -239,8 +260,10 @@ async function safeReply(sock, msg, text, targetPhone) {
 
 async function sendNow(sock, jid, text) {
   try {
-    const sent = await sock.sendMessage(jid, { text });
-    if (sent?.key?.id) botSentIds.add(sent.key.id);
+    const phone = normalizePhone(jid);
+    const target = adminChatAddresses.get(phone) || jid;
+    const sent = await boundedSend(sock.sendMessage(target, { text }));
+    rememberSent(sent);
     return sent;
   } catch (e) {
     recordLog(`SendNow failed for ${jid}: ${e.message}`);
@@ -361,6 +384,7 @@ async function handleMessage(sock, msg) {
 
   const realPhone = resolveClientPhone(rawJid, msg);
   const isAdmin = KNOWN_ADMINS.has(realPhone) || KNOWN_ADMINS.has(phone);
+  if (isAdmin && realPhone) adminChatAddresses.set(realPhone, rawJid);
   const coords = extractCoords(msg.message);
   const rawText = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
 
@@ -621,6 +645,8 @@ async function startBot() {
   const sock = makeWASocket({
     ...(waVersion ? { version: waVersion } : {}),
     auth: state,
+    // WhatsApp may request the original content when a device cannot decrypt.
+    getMessage: async key => sentMessages.get(key.id),
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
     browser: ['Windows', 'Chrome', '124.0.6367.82'],
@@ -692,6 +718,12 @@ async function startBot() {
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     for (const msg of messages) {
+      if (msg.message?.protocolMessage || msg.message?.senderKeyDistributionMessage) continue;
+      const queueKey = msg.key?.remoteJid;
+      if (!queueKey) continue;
+      // Serialize a customer's messages without blocking other conversations.
+      const previous = chatQueues.get(queueKey) || Promise.resolve();
+      const task = previous.catch(() => {}).then(async () => {
       const rawText = msg.message?.conversation || msg.message?.extendedTextMessage?.text || (msg.message?.locationMessage ? '[LOCATION]' : '');
       recordLog(`📨 Upsert [${type}]: jid=${msg.key?.remoteJid} fromMe=${msg.key?.fromMe} text="${(rawText || '').slice(0, 30)}"`);
       try { await handleMessage(sock, msg); }
@@ -704,6 +736,11 @@ async function startBot() {
           await safeReply(sock, msg, `وقع مشكل تقني فمعالجة الرسالة. عفاك تواصل مع المسؤول: https://wa.me/${ADMIN_PHONE}`, phone).catch(() => {});
         }
       }
+      });
+      chatQueues.set(queueKey, task);
+      task.finally(() => {
+        if (chatQueues.get(queueKey) === task) chatQueues.delete(queueKey);
+      }).catch(e => recordLog(`Message queue error: ${e.message}`));
     }
   });
 }

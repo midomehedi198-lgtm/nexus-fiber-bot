@@ -57,6 +57,8 @@ Never include credentials, WhatsApp auth bundles, customer sessions, or QR image
 
 ## Working rules
 
+- Customer requirement added: wait 5 seconds before each customer reply (including when typing presence fails). Notify ADMIN_PHONE when GPS is received with map/coverage/current stage and again when name is recorded, before customer confirmation. These stages describe bot intake, not operator acceptance or installation completion.
+
 - Treat the supplied conversation as historical context; verify claims against code and live responses.
 - Read credentials only where needed; never copy them into this file, code, remote URLs or public logs.
 - Avoid force pushes, broad git staging, auth resets and unrelated application configuration changes.
