@@ -203,9 +203,10 @@ async function safeReply(sock, msg, text, targetPhone) {
 
   try {
     await sock.sendPresenceUpdate('composing', rawJid || pnJid);
-    await new Promise(r => setTimeout(r, 800));
-    await sock.sendPresenceUpdate('paused', rawJid || pnJid);
   } catch (_) {}
+  // Always wait five seconds, even if the typing indicator is unavailable.
+  await new Promise(r => setTimeout(r, 5000));
+  try { await sock.sendPresenceUpdate('paused', rawJid || pnJid); } catch (_) {}
 
   let delivered = false;
 
@@ -300,12 +301,24 @@ async function sendLeadAlert(sock, clientPhone, name, result, lat, lng) {
 
   for (const r of [...new Set([ADMIN_PHONE, WASIT_PHONE])]) {
     try {
-      await sendNow(sock, `${r}@s.whatsapp.net`, msg);
-      recordLog(`📨 Lead alert sent to ${r}`);
+      const sent = await sendNow(sock, `${r}@s.whatsapp.net`, msg);
+      if (sent) recordLog(`📨 Lead alert accepted for ${r}`);
+      else recordLog(`⚠️ Lead alert failed for ${r}`);
     } catch (e) {
       recordLog(`Alert failed for ${r}: ${e.message}`);
     }
   }
+}
+
+async function notifyOrderProgress(sock, msg, session, clientPhone, stage) {
+  const contact = clientPhone ? `+${clientPhone}\nhttps://wa.me/${clientPhone}` : `معرف المحادثة: ${msg.key.remoteJid}`;
+  const location = Number.isFinite(session.lat) && Number.isFinite(session.lng)
+    ? `\n📍 https://maps.google.com/?q=${session.lat},${session.lng}` : '';
+  const coverage = session.result ? `\n📡 الفحص الأولي: ${session.result.status}\nالمنطقة: ${session.result.zoneName}\nالمشغل فالخريطة: ${session.result.operator}` : '';
+  const sent = await sendNow(sock, `${ADMIN_PHONE}@s.whatsapp.net`,
+    `📋 *تتبع طلب الفايبر*\n\n${contact}\n👤 الاسم: ${session.name || 'باقي ما تسجلش'}\n🔄 المرحلة: ${stage}${location}${coverage}`);
+  if (!sent) recordLog('⚠️ Order progress notification failed; not confirmed as sent.');
+  return !!sent;
 }
 
 function isValidName(t) {
@@ -392,6 +405,8 @@ async function handleMessage(sock, msg) {
       reply = '📍 ما لقيناش تغطية قريبة حسب الخريطة المتوفرة عندنا. هادي ماشي نتيجة نهائية من المشغل.\n\nتقدر تطلب المسؤول باش يراجع العنوان معاك.';
       await requestHuman(sock, msg, session, realPhone, `موقع يحتاج مراجعة: https://maps.google.com/?q=${coords.lat},${coords.lng}`);
     }
+    await notifyOrderProgress(sock, msg, getSession(realPhone || phone), realPhone,
+      result.status === 'NO_COVERAGE' ? 'توصلنا بالموقع — خاص مراجعة بشرية للتغطية' : 'توصلنا بالموقع وفحصناه — كنتسناو الاسم الكامل');
     await safeReply(sock, msg, reply, realPhone);
     return;
   }
@@ -412,14 +427,16 @@ async function handleMessage(sock, msg) {
     }
 
     updateSession(realPhone || phone, { name: rawText, step: 'COMPLETED' });
+    await notifyOrderProgress(sock, msg, getSession(realPhone || phone), realPhone,
+      'تسجل الاسم والموقع — الطلب جاهز للمتابعة البشرية وتأكيد العرض؛ التركيب مازال ما تأكدش');
 
     const confirmMsg =
       `تم تسجيل طلبك بنجاح سي *${rawText}*! ✅\n\n` +
       `تسجلت المعلومات عند المساعد. المسؤول غادي يراجع إمكانية الربط والعرض معاك حسب التوفر. هاد التسجيل ماشي تأكيد نهائي للاشتراك أو موعد التركيب.\n\n` +
       `شكراً على ثقتك بنا 🤝!`;
 
-    await safeReply(sock, msg, confirmMsg, realPhone);
     await sendLeadAlert(sock, realPhone || phone, rawText, session.result, session.lat, session.lng);
+    await safeReply(sock, msg, confirmMsg, realPhone);
     recordLog(`✅ LEAD CONFIRMED: ${rawText} | +${realPhone || phone} | ${session.result?.zoneName}`);
     return;
   }

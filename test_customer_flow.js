@@ -16,8 +16,9 @@ async function main() {
   const source = fs.readFileSync(require.resolve('./real_production_bot'), 'utf8');
   const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
   const sent = [];
+  const delays = [];
   const context = {
-    botSentIds: new Set(), recordLog() {}, setTimeout: callback => callback(),
+    botSentIds: new Set(), recordLog() {}, setTimeout: (callback, delay) => { delays.push(delay); callback(); },
     Promise, ADMIN_PHONE: '212600000000', saveSessions() {}, askMultiTierLLM: engine.askMultiTierLLM
   };
   vm.createContext(context);
@@ -36,6 +37,7 @@ async function main() {
   assert.equal(await context.safeReply(sock, msg, 'reply', '212611111111'), true);
   assert.equal(sent.length, 1, 'one customer reply despite two possible JIDs');
   assert.equal(sent[0].jid, 'sample@lid', 'reply targets original inbound LID');
+  assert.equal(delays[0], 5000, 'customer reply waits five seconds');
   const fallbackTargets = [];
   const fallbackSock = { ...sock, sendMessage: async jid => {
     fallbackTargets.push(jid);
@@ -55,6 +57,18 @@ async function main() {
   const failedSession = {};
   assert.equal(await context.requestHuman(failedSock, msg, failedSession, '', 'failure'), false);
   assert.equal(failedSession.lastHandoff, undefined, 'failed alert remains retryable');
+  vm.runInContext(section('async function notifyOrderProgress(', 'function isValidName('), context);
+  assert.equal(await context.notifyOrderProgress(sock, msg, {
+    name: 'Test Customer', lat: 33.5, lng: -7.6,
+    result: { status: 'DIRECT', zoneName: 'Test zone', operator: 'Test operator' }
+  }, '212611111111', 'WAITING_NAME'), true);
+  const progress = sent.at(-1);
+  assert.equal(progress.jid, '212600000000@s.whatsapp.net');
+  for (const field of ['Test Customer', 'WAITING_NAME', '33.5,-7.6', 'Test zone']) assert.ok(progress.text.includes(field));
+  const presenceFailure = { ...sock, sendPresenceUpdate: async () => { throw new Error('unavailable'); } };
+  const before = delays.length;
+  await context.safeReply(presenceFailure, msg, 'test', '212611111111');
+  assert.equal(delays[before], 5000, 'delay still applies when presence fails');
   console.log('PASS: Arabic/Latin intents, unknown escalation, single reply, admin handoff, debounce, failed alert retry.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
