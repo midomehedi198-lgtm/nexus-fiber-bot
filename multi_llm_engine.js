@@ -1,190 +1,43 @@
-/**
- * ============================================================================
- * NEXUS-TELECOM — MULTI-TIER LLM CASCADE ENGINE v3.0
- * ============================================================================
- * 4-Tier Zero-Fail Resilience for Moroccan Fiber Optic Sales Bot
- *
- * Tier 1: OmniRouter → openrouter/meta-llama/llama-3.3-70b-instruct (FREE, confirmed working)
- * Tier 2: OmniRouter → openrouter/meta-llama/llama-4-maverick (FREE, confirmed working)
- * Tier 3: Pollinations AI free cloud (GET endpoint, no key needed)
- * Tier 4: Deterministic Moroccan Darija Sales Shield (100% zero-fail guarantee)
- */
-
 'use strict';
-const http  = require('http');
-const https = require('https');
 
-// ─── System prompt ────────────────────────────────────────────────────────────
-const DARIJA_SYSTEM_PROMPT =
-`أنت مستشار مبيعات محترف متخصص في خدمات الفايبر أوبتيك بالمغرب (شركتا Inwi و IAM).
-كتجاوب الزبناء بالدارجة المغربية بطريقة سلسة، ودية، ومشجعة وبإيجاز تام (3-5 جمل فقط).
-جاوب على سؤال الزبون مباشرة ثم اطلب منه إرسال Localisation Pin ديالو من واتساب.
-المعلومات الصحيحة:
-- الفايبر ماشي ضروري يكون عند الزبون أي كونيكسيون قديم — التقني يجيب كابل الفايبر والمودم/الروتور ويركب كلشي مجانا تماما.
-- 100 ميغا: 249 درهم/شهر | 200 ميغا: 349 درهم/شهر.
-- الروتور واي-فاي مجاني (فابور) + التركيب مجاني 100%.
-- التقني يتواصل مع الزبون خلال 24 إلى 48 ساعة بعد تأكيد الموقع.
-- لا تذكر أرقام أو أسعار مختلفة عما ذكر أعلاه.`;
+// Local replies have no API cost and never transmit customer messages to an LLM.
+const LOCATION = '📍 صيفط لينا موقع الدار من WhatsApp: المرفقات 📎 ← الموقع ← إرسال موقعك الحالي. إلا ما كنتيش فالدار، صيفط النقطة ديال الدار من الخريطة.';
 
-// ─── Helper: HTTP POST to local OmniRouter ────────────────────────────────────
-function omniPost(model, userText, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const payload = JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: DARIJA_SYSTEM_PROMPT },
-        { role: 'user',   content: userText }
-      ],
-      max_tokens: 400,
-      temperature: 0.7
-    });
-
-    const req = http.request({
-      hostname: '127.0.0.1',
-      port: 20128,
-      path: '/v1/chat/completions',
-      method: 'POST',
-      timeout: timeoutMs,
-      headers: {
-        'Content-Type':   'application/json',
-        'Authorization':  'Bearer sk-20f66e01d86a18e2-32674e-4e58d098',
-        'Content-Length': Buffer.byteLength(payload)
-      }
-    }, res => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-        try {
-          const j = JSON.parse(data);
-          const content = j?.choices?.[0]?.message?.content || '';
-          if (!content || content.includes('no longer supported') || content.length < 5) {
-            return reject(new Error('Bad or empty content'));
-          }
-          resolve(content.trim());
-        } catch (e) { reject(e); }
-      });
-    });
-
-    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
-    req.on('error',   reject);
-    req.write(payload);
-    req.end();
-  });
+function classify(text) {
+  const t = String(text || '').normalize('NFKC').toLowerCase().trim();
+  if (/بشري|مسؤول|موظف|شي واحد|هضر مع|اتصل بي|عيط ليا|شكاية|مشكل|مافهمت|ما فهمت|مفهمتش|agent|humain|conseiller|rappelle|reclamation|réclamation|ما جاوبت|ماجاوبت|mabghitch|mafhemt|ma fhemt|3iyet|3ayet/.test(t)) return 'handoff';
+  if (/بشحال|شحال|ثمن|سعر|عروض|taman|prix|offre|combien|bchhal|bch7al|flous|\b(?:100|200)\b|ميغا|mega/.test(t)) return 'pricing';
+  if (/روتور|راوتر|موديم|تركيب|مجاني|فابور|routeur|router|modem|installation|gratuit/.test(t)) return 'installation';
+  if (/وقتاش|امتى|متى|موعد|تقني|wqtach|technicien|rendez/.test(t)) return 'timing';
+  if (/عقد|وثائق|بطاقة|التزام|الغاء|إلغاء|contrat|document|engagement|résili|resili/.test(t)) return 'contract';
+  if (/adsl|كونيكسيون|connexion|قديمة|واش خاصو/.test(t)) return 'existing';
+  if (/تغطية|شبكة|اتصالات|واصل|كاين|فايبر|فيبر|موقع|لوكيشن|fibre|fiber|coverage|inwi|iam|orange|réseau|reseau|localisation|position|location/.test(t)) return 'coverage';
+  if (/^(?:سلام(?: عليكم)?|السلام عليكم(?: ورحمة الله)?|مرحبا|أهلا|اهلا|لاباس|شكرا|slm|salam|salut|hello|hi|bonjour|marhaba|cv|labas|merci|chokran)[\s!?؟،.]*$/u.test(t)) return 'greeting';
+  return 'unknown';
 }
 
-// ─── TIER 1: Llama 3.3 70B via OpenRouter (FREE, confirmed 200 OK) ───────────
-function queryTier1(text) {
-  return omniPost('openrouter/meta-llama/llama-3.3-70b-instruct', text, 5000);
+function replyFor(intent) {
+  switch (intent) {
+    case 'pricing': return `📶 *عروض الفايبر*\n\nالأثمنة المذكورة فالعروض ديالنا: 100 ميغا بـ *249 درهم/الشهر*، و200 ميغا بـ *349 درهم/الشهر*. خاص المسؤول يأكد ليك العرض الحالي والمصاريف والشروط حسب المشغل والعنوان قبل الاشتراك.\n\n${LOCATION}`;
+    case 'installation': return `🛠️ *الروتور والتركيب*\n\nالإعفاء من مصاريف الروتور والتركيب كيتحدد حسب العرض وشروط المشغل. المسؤول كيأكد ليك التفاصيل قبل أي التزام.\n\n${LOCATION}`;
+    case 'timing': return `🗓️ *موعد التركيب*\n\nمن بعد التحقق من التغطية، المسؤول كيتواصل معاك لتأكيد الشروط والموعد المتاح. ما نقدرش نضمن نهار التركيب قبل تأكيد المشغل.\n\n${LOCATION}`;
+    case 'contract': return '📋 *شروط الاشتراك*\n\nمدة الالتزام والوثائق والمصاريف كتختلف حسب المشغل والعرض. غادي نحوّل سؤالك للمسؤول باش يعطيك التفاصيل المؤكدة قبل ما تقرر.';
+    case 'existing': return `ماشي ضروري تكون عندك خدمة ADSL قديمة باش نراجعو إمكانية الاشتراك فالفايبر. القبول كيبقى حسب العنوان وشروط المشغل.\n\n${LOCATION}`;
+    case 'coverage': return `📡 نقدر ندير ليك فحص أولي للتغطية حسب الخريطة المتوفرة ديال IAM وInwi. التأكيد النهائي كيديرو المشغل؛ القرب من منطقة فالخريطة بوحدو ما كيضمنش الربط.\n\n${LOCATION}`;
+    case 'greeting': return `مرحبا بيك 👋\nأنا المساعد الآلي ديال *Nexus Fiber*. نعاونك تعرف العروض وتفحص التغطية الأولية، وتقدر تطلب المسؤول فأي وقت.\n\n${LOCATION}`;
+    case 'handoff': return 'فهمتك 🤝 غادي نحاول نحوّل طلبك للمسؤول باش يتابع معاك مباشرة.';
+    default: return 'باش ما نعطيكش معلومة غير مؤكدة، غادي نحاول نحوّل سؤالك للمسؤول 🤝\n\nنقدر نعاونك دابا فالعروض، الروتور والتركيب، أو فحص التغطية. كتب ليا شنو محتاج.';
+  }
 }
 
-// ─── TIER 2: Llama 4 Maverick via OpenRouter (FREE fallback) ─────────────────
-function queryTier2(text) {
-  return omniPost('openrouter/meta-llama/llama-4-maverick', text, 6000);
-}
+function queryTier4(text) { return replyFor(classify(text)); }
 
-// ─── TIER 3: Pollinations AI free cloud (no key needed) ──────────────────────
-function queryTier3(text, timeoutMs = 7000) {
-  return new Promise((resolve, reject) => {
-    const prompt = encodeURIComponent(
-      `${DARIJA_SYSTEM_PROMPT}\n\nسؤال الزبون: ${text}\nأجب بالدارجة المغربية بإيجاز (3-5 جمل فقط):`
-    );
-    const req = https.get(
-      `https://text.pollinations.ai/${prompt}`,
-      { timeout: timeoutMs },
-      res => {
-        let data = '';
-        res.on('data', c => data += c);
-        res.on('end', () => {
-          if (res.statusCode !== 200 || !data || data.includes('"error":')) {
-            return reject(new Error(`Pollinations HTTP ${res.statusCode}`));
-          }
-          const clean = data.trim()
-            .replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
-          if (clean.length > 5) resolve(clean);
-          else reject(new Error('Response too short'));
-        });
-      }
-    );
-    req.on('timeout', () => { req.destroy(); reject(new Error('Pollinations timeout')); });
-    req.on('error',   reject);
-  });
-}
-
-// ─── TIER 4: Deterministic Darija Sales Shield (100% zero-fail) ──────────────
-function queryTier4(text) {
-  const t = (text || '').toLowerCase();
-
-  if (/كونيكسيون|connexion|ضروري|قديمة|واش خاصو/.test(t)) {
-    return (
-      `لا أخي، ماشي ضروري نهائياً! ⚡\n\n` +
-      `التقني ديالنا كيجي للدار كيدوز كابل الفايبر الجديد ويركب المودم + الروتور واي-فاي وكيخدم النت عاد تخلص فقط.\n` +
-      `كلشي مجاني (تركيب + الروتور) 🎁\n\n` +
-      `📍 صيفط لينا *Localisation Pin* ديالك من واتساب باش نشوفو أقرب كابل للدار ديالك!`
-    );
-  }
-
-  if (/ثمن|بشحال|prix|taman|عروض|100|200|ميغا|mega/.test(t)) {
-    return (
-      `أفضل عروض الفايبر أوبتيك بالمغرب! 🇲🇦⚡\n\n` +
-      `📶 *100 ميغا:* 249 درهم/شهر فقط\n` +
-      `🚀 *200 ميغا:* 349 درهم/شهر\n` +
-      `🎁 الروتور واي-فاي مجاني + التركيب مجاني 100%!\n\n` +
-      `📍 صيفط لينا *Localisation Pin* ديالك باش نتأكدوا من التغطية فبلاصتك!`
-    );
-  }
-
-  if (/روتور|routeur|موديم|modem|تركيب|installation|مجاني|gratuit|فابور/.test(t)) {
-    return (
-      `الروتور واي-فاي عالي السرعة *مجاني (فابور)* مع الاشتراك 🎁\n` +
-      `والتركيب كيديرو التقني احترافياً بدون أي مقابل.\n\n` +
-      `📍 صيفط لينا *Localisation Pin* ديالك باش نفحصوا التغطية في ثواني!`
-    );
-  }
-
-  if (/وقتاش|امتى|متى|wqtach|technicien|تقني|موعد|rendez/.test(t)) {
-    return (
-      `بعد تأكيد موقعك واسمك، التقني كيتواصل معك خلال ⏱️ *24 إلى 48 ساعة* كحد أقصى باش يحدد معك الموعد المناسب للتركيب المجاني!\n\n` +
-      `📍 صيفط لينا *Localisation Pin* ديالك دابا باش نبدأوا الإجراءات!`
-    );
-  }
-
-  if (/تغطية|coverage|inwi|iam|اتصالات|شبكة|réseau/.test(t)) {
-    return (
-      `نغطي شبكتي *اتصالات المغرب (IAM)* و *إنوي (Inwi)* في أكثر من 2,448 منطقة 📡\n\n` +
-      `📍 صيفط لينا *Localisation Pin* ديالك وغادي نعطيوك نتيجة التغطية فثواني!`
-    );
-  }
-
-  // General greeting / unclear inquiry
-  return (
-    `السلام عليكم ورحمة الله! مرحباً بك في خدمة *الفايبر أوبتيك بالمغرب* 🇲🇦⚡\n\n` +
-    `نغطي شبكتي IAM و Inwi — 2,448 منطقة على الخريطة الحقيقية.\n\n` +
-    `📍 صيفط لينا *Localisation Pin* ديالك من واتساب وغادي نعطيوك نتيجة التغطية والعرض المناسب فثواني!`
-  );
-}
-
-// ─── MASTER CASCADE FUNCTION ──────────────────────────────────────────────────
 async function askMultiTierLLM(userText) {
-  const t = (userText || '').toLowerCase().trim();
-
-  // 1. INSTANT SALES SHIELD (0ms latency, 100% Moroccan Darija, zero external dependencies)
-  // Handles greetings, pricing, router, installation, coverage, timing, and ADSL inquiries
-  const isDirectMatch =
-    /سلام|slm|salam|salut|hello|hi|bonjour|marhaba|مرحبا|اهلين|أهلا|cv|labas|لاباس|فينك|finak|kidayr|هيلو|hallo|alo|الو|كونيكسيون|connexion|ضروري|قديمة|واش خاصو|adsl|بشحال|ثمن|taman|prix|عروض|عقد|offre|100|200|ميغا|mega|flous|شحال|combien|bchhal|روتور|موديم|modem|routeur|تركيب|فابور|مجاني|gratuit|installation|تغطية|coverage|واصل|كاين|واش كاينة|واش كاين|inwi|iam|اتصالات|شبكة|réseau|تقني|technicien|وقتاش|امتى|متى|موعد|rendez|wqtach/.test(t);
-
-  if (isDirectMatch) {
-    return { text: queryTier4(userText), tier: 4, provider: 'Instant Darija Shield' };
-  }
-
-  // 2. Pollinations Cloud AI for any open/unusual question (fast 2.5s timeout)
-  try {
-    const tCloud = await queryTier3(userText, 2500);
-    return { text: tCloud, tier: 3, provider: 'Pollinations Cloud AI' };
-  } catch (_) {}
-
-  // 3. Fallback to Darija Sales Shield (100% guarantee)
-  return { text: queryTier4(userText), tier: 4, provider: 'Deterministic Darija Shield' };
+  const intent = classify(userText);
+  return {
+    text: replyFor(intent), intent, tier: 4, provider: 'Local Darija replies',
+    needsHuman: ['unknown', 'handoff', 'contract'].includes(intent)
+  };
 }
 
-module.exports = { askMultiTierLLM, queryTier4 };
+module.exports = { askMultiTierLLM, queryTier4, classify };

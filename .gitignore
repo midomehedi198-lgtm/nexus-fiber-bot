@@ -3,3 +3,7 @@ node_modules
 auth_info_baileys
 .DS_Store
 *.log
+auth_backup_bundle.json
+session_bundle.json
+sessions.json
+whatsapp_qr.png

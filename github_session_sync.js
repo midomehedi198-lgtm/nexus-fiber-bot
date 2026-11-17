@@ -13,6 +13,28 @@
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const SESSION_KEY = process.env.SESSION_ENCRYPTION_KEY || '';
+
+function encodeBundle(bundle) {
+  const key = Buffer.from(SESSION_KEY, 'base64');
+  if (key.length !== 32) throw new Error('SESSION_ENCRYPTION_KEY must contain 32 random bytes in base64');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const data = Buffer.concat([cipher.update(JSON.stringify(bundle), 'utf8'), cipher.final()]);
+  return { version: 1, algorithm: 'aes-256-gcm', iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), data: data.toString('base64') };
+}
+
+function decodeBundle(payload) {
+  // Read legacy bundles during migration; all subsequent writes require encryption.
+  if (!payload.algorithm) return payload;
+  if (payload.algorithm !== 'aes-256-gcm' || payload.version !== 1) throw new Error('Unsupported session encryption');
+  const key = Buffer.from(SESSION_KEY, 'base64');
+  if (key.length !== 32) throw new Error('Session decryption key missing or invalid');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(payload.iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(payload.tag, 'base64'));
+  return JSON.parse(Buffer.concat([decipher.update(Buffer.from(payload.data, 'base64')), decipher.final()]).toString('utf8'));
+}
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 const GITHUB_REPO  = process.env.GITHUB_REPO  || 'midomehedi198-lgtm/nexus-fiber-bot';
@@ -63,6 +85,7 @@ function githubRequest(method, apiPath, body = null) {
  * Restore WhatsApp session files from GitHub into authDir
  */
 async function restoreSessionFromGitHub(authDir) {
+  if (!GITHUB_TOKEN) return false;
   try {
     console.log('🔄 Checking GitHub for existing WhatsApp session...');
     const res = await githubRequest(
@@ -82,8 +105,15 @@ async function restoreSessionFromGitHub(authDir) {
 
     // Decode bundle content
     const rawBundleJson = Buffer.from(res.data.content, 'base64').toString('utf8');
-    const bundle = JSON.parse(rawBundleJson);
+    const bundle = decodeBundle(JSON.parse(rawBundleJson));
     const files = Object.keys(bundle);
+
+    // Validate the entire bundle before writing any auth files.
+    if (files.some(filename => !/^[a-zA-Z0-9_.-]+\.json$/.test(filename) ||
+        typeof bundle[filename] !== 'string')) {
+      console.warn('GitHub session bundle contains invalid filenames or values.');
+      return false;
+    }
 
     if (files.length === 0 || !bundle['creds.json']) {
       console.warn('⚠️ GitHub session bundle is empty or missing creds.json');
@@ -124,6 +154,7 @@ async function restoreSessionFromGitHub(authDir) {
  * Save all files in authDir to GitHub session-storage branch
  */
 async function saveSessionToGitHub(authDir) {
+  if (!GITHUB_TOKEN || !SESSION_KEY) return;
   // Debounce saves: at most once every 10 seconds
   if (isSaving || Date.now() - lastSaveTime < 10000) return;
   if (!fs.existsSync(authDir)) return;
@@ -165,7 +196,7 @@ async function saveSessionToGitHub(authDir) {
     );
     const sha = existing.status === 200 ? existing.data?.sha : undefined;
 
-    const bundleString = JSON.stringify(bundle, null, 2);
+    const bundleString = JSON.stringify(encodeBundle(bundle));
     const contentBase64 = Buffer.from(bundleString).toString('base64');
 
     const putRes = await githubRequest(
@@ -193,6 +224,8 @@ async function saveSessionToGitHub(authDir) {
 }
 
 module.exports = {
+  encodeBundle,
+  decodeBundle,
   restoreSessionFromGitHub,
   saveSessionToGitHub
 };

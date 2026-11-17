@@ -5,7 +5,6 @@
  * ============================================================================
  */
 
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
@@ -44,12 +43,13 @@ function resolveClientPhone(rawJid, msg) {
   if (!rawJid) return '';
   const idPart = rawJid.split('@')[0].split(':')[0].replace(/\D/g, '');
   if (LID_TO_PHONE[idPart]) return LID_TO_PHONE[idPart];
-  if (msg?.key?.senderPn) {
-    const pn = msg.key.senderPn.replace(/\D/g, '');
+  const senderPn = msg?.key?.senderPn || msg?.key?.remoteJidAlt;
+  if (senderPn?.endsWith('@s.whatsapp.net')) {
+    const pn = normalizePhone(senderPn);
     LID_TO_PHONE[idPart] = pn;
     return pn;
   }
-  return idPart;
+  return rawJid.endsWith('@s.whatsapp.net') ? idPart : '';
 }
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -180,7 +180,10 @@ function detectOp(f) {
 // ============================================================================
 function extractCoords(msg) {
   const loc = msg.locationMessage || msg.liveLocationMessage;
-  if (loc?.degreesLatitude) return { lat: loc.degreesLatitude, lng: loc.degreesLongitude };
+  if (loc && Number.isFinite(loc.degreesLatitude) && Number.isFinite(loc.degreesLongitude) &&
+      Math.abs(loc.degreesLatitude) <= 90 && Math.abs(loc.degreesLongitude) <= 180) {
+    return { lat: loc.degreesLatitude, lng: loc.degreesLongitude };
+  }
   const text = (msg.conversation || msg.extendedTextMessage?.text || '').trim();
   const m1 = text.match(/[?&]q=(-?\d+\.?\d*)(?:%2C|,)(-?\d+\.?\d*)/i);
   if (m1) return { lat: +m1[1], lng: +m1[2] };
@@ -219,7 +222,7 @@ async function safeReply(sock, msg, text, targetPhone) {
   }
 
   // PRIORITY 2: Send to rawJid with quoted context
-  if (rawJid && rawJid !== pnJid) {
+  if (!delivered && rawJid) {
     try {
       const sent = await sock.sendMessage(rawJid, { text }, { quoted: msg });
       if (sent?.key?.id) botSentIds.add(sent.key.id);
@@ -258,6 +261,30 @@ async function alertAdmins(sock, clientPhone, event) {
   }
 }
 
+async function requestHuman(sock, msg, session, clientPhone, reason) {
+  // Avoid duplicate alerts, but only mark delivery after WhatsApp accepts it.
+  if (session.lastHandoff && Date.now() - session.lastHandoff < 15 * 60 * 1000) return true;
+  const contact = clientPhone ? `+${clientPhone}\nhttps://wa.me/${clientPhone}` : `معرف المحادثة: ${msg.key.remoteJid}\nالرقم مازال غير متوفر؛ خاص التحقق قبل الاتصال.`;
+  const result = await sendNow(sock, `${ADMIN_PHONE}@s.whatsapp.net`,
+    `🧑‍💼 *طلب متابعة بشرية — Nexus Fiber*\n\n${contact}\nالسبب: ${reason}\nرسالة الزبون: ${String(msg.message?.conversation || msg.message?.extendedTextMessage?.text || '[وسائط أو موقع]').slice(0, 1000)}\n\nالمرحلة: ${session.step}`);
+  if (!result) return false;
+  session.lastHandoff = Date.now();
+  saveSessions();
+  return true;
+}
+
+async function answerQuestion(sock, msg, session, clientPhone, rawText, suffix = '') {
+  const reply = await askMultiTierLLM(rawText);
+  let text = reply.text;
+  if (reply.needsHuman) {
+    const sent = await requestHuman(sock, msg, session, clientPhone, reply.intent);
+    text += sent ? '\n\n✅ تصيفط إشعار للمسؤول باش يراجع طلبك. الرد كيبقى حسب التوفر.' : '\n\n⚠️ ما تأكدش إرسال الإشعار. تقدر تتواصل مباشرة مع المسؤول: https://wa.me/' + ADMIN_PHONE;
+  }
+  if (!await safeReply(sock, msg, text + suffix, clientPhone)) {
+    await requestHuman(sock, msg, session, clientPhone, 'تعذر إرسال جواب البوت');
+  }
+}
+
 async function sendLeadAlert(sock, clientPhone, name, result, lat, lng) {
   const link = `https://maps.google.com/?q=${lat},${lng}`;
   const msg =
@@ -290,7 +317,8 @@ function isValidName(t) {
     'وقتاش', 'امتى', 'فين', 'سلام', 'شكرا', 'مرحبا', 'wach', 'bchhal', 'taman',
     'salam', 'slm', 'chokran', 'merci', 'hello', 'hi', 'cv'
   ];
-  if (notNames.some(w => lower.includes(w))) return false;
+  if (notNames.some(w => lower.split(/\s+/u).includes(w))) return false;
+  if (!/^[\p{L}\p{M}][\p{L}\p{M}\s.'’\-]+$/u.test(t)) return false;
   if ((t.match(/\n/g) || []).length > 2) return false;
   return true;
 }
@@ -330,11 +358,21 @@ async function handleMessage(sock, msg) {
   // Debounced alert for new clients: at most once every 2 hours per client, NEVER for admins
   const now = Date.now();
   if (!session.lastAlert || (now - session.lastAlert > 7200000)) {
-    if (!coords && !isAdmin) {
-      session.lastAlert = now;
-      saveSessions();
-      await alertAdmins(sock, realPhone || phone, 'بدأ محادثة مع البوت');
+    if (!isAdmin) {
+      const contact = realPhone ? `+${realPhone}\nhttps://wa.me/${realPhone}` : `معرف WhatsApp: ${rawJid} (الرقم غير متوفر)`;
+      const notice = await sendNow(sock, `${ADMIN_PHONE}@s.whatsapp.net`, `🔔 *زبون تواصل مع Nexus Fiber*\n\n${contact}\nأول رسالة: ${rawText.slice(0, 500) || '[موقع أو وسائط]'}`);
+      if (notice) {
+        session.lastAlert = now;
+        saveSessions();
+      }
     }
+  }
+
+  const inquiry = await askMultiTierLLM(rawText);
+  const awaitingName = session.step === 'WAITING_NAME';
+  if (!coords && (!rawText || (inquiry.needsHuman && !(awaitingName && inquiry.intent === 'unknown' && isValidName(rawText))))) {
+    await answerQuestion(sock, msg, session, realPhone, rawText);
+    return;
   }
 
   // ── CAS 1: LOCATION RECEIVED (REAL GIS 2,448 ZONES)
@@ -344,14 +382,15 @@ async function handleMessage(sock, msg) {
 
     let reply;
     if (result.status === 'DIRECT') {
-      reply = `🎉 *خبار زوين بزاف أخي!*\n\nالفايبر أوبتيك (*${result.operator}*) متوفر مباشرة في بقعتك (*${result.zoneName}*) ✅\n\nصيفط لينا *الاسم الكامل* ديالك دابا باش نسجلو الطلب ويتاصل بك التقني اليوم للتركيب المجاني 🚀`;
+      reply = `📍 موقعك داخل منطقة مسجلة فالخريطة (*${result.zoneName}*، ${result.operator}). هادي نتيجة أولية؛ الربط النهائي خاصو تأكيد المشغل.\n\nصيفط لينا *الاسم الكامل* ديالك باش المسؤول يتابع معاك الطلب.`;
     } else if (['BUFFER_15M', 'PROXIMITY_90'].includes(result.status)) {
-      reply = `👋 *أهلاً بك خويا العزيز!*\n\nموقعك قريب من شبكة الفايبر (*${result.operator}*) — أقرب كابل في *${result.zoneName}* على بعد حوالي ${result.distanceMeters}م ⚡\n\nإمكانية التوصيل للبناية ديالك واردة بنسبة 90% 📶\n\nعفاك صيفط لينا *الاسم الكامل* ديالك باش يخرج التقني يفحص البوكس ويتاصل بك! 📞`;
+      reply = `📍 موقعك قريب من منطقة مسجلة فالخريطة (*${result.zoneName}*) بحوالي ${result.distanceMeters}م. هاد المسافة تقديرية وما كتأكدش وجود كابل قابل للربط.\n\nصيفط لينا *الاسم الكامل* ديالك باش المسؤول يراجع إمكانية الاشتراك مع المشغل.`;
     } else if (result.status === 'PROXIMITY_FAR') {
       reply = `🙏 *السلام عليكم أخاي!*\n\nموقعك على بعد *${result.distanceMeters}م* من أقرب كابلاج (*${result.zoneName}*).\n\nالتغطية غير مؤكدة، خاصنا فني يفحص ميدانياً.\n\nصيفط لينا *الاسم الكامل* ديالك باش نقيدوك ونرسل فني يفحص! 📋`;
     } else {
       updateSession(realPhone || phone, { step: 'IDLE' });
-      reply = `للأسف أخاي، موقعك حالياً بعيد على شبكة الفايبر المتوفرة (${result.distanceMeters}م) ⏳\n\nقيدت رقمك (+${realPhone || phone}) وغادي تكون أول من نعلموه إن شاء الله أول ما يدوز الكابلاج لحيكم 🙏`;
+      reply = '📍 ما لقيناش تغطية قريبة حسب الخريطة المتوفرة عندنا. هادي ماشي نتيجة نهائية من المشغل.\n\nتقدر تطلب المسؤول باش يراجع العنوان معاك.';
+      await requestHuman(sock, msg, session, realPhone, `موقع يحتاج مراجعة: https://maps.google.com/?q=${coords.lat},${coords.lng}`);
     }
     await safeReply(sock, msg, reply, realPhone);
     return;
@@ -359,17 +398,12 @@ async function handleMessage(sock, msg) {
 
   // ── CAS 2: NAME RECEIVED AFTER LOCATION
   if (session.step === 'WAITING_NAME') {
-    if (!isValidName(rawText)) {
-      const isQuestion = rawText.includes('?') || rawText.includes('؟') ||
+    if (inquiry.intent !== 'unknown' || !isValidName(rawText)) {
+      const isQuestion = inquiry.intent !== 'unknown' || rawText.includes('?') || rawText.includes('؟') ||
         /واش|بشحال|ثمن|ضروري|روتور|موديم|وقتاش|امتى|wach|bchhal|taman/.test(rawText.toLowerCase());
 
       if (isQuestion) {
-        const llmReply = await askMultiTierLLM(rawText);
-        await safeReply(sock, msg,
-          `${llmReply.text}\n\n` +
-          `📌 *وباش يتاصل بك التقني ويبرمج موعد الفحص والتركيب المجاني، عفاك صيفط لينا الاسم الكامل ديالك (مثلاً: محمد أمين) 🙏*`,
-          realPhone
-        );
+        await answerQuestion(sock, msg, session, realPhone, rawText, '\n\n📋 باش نكملو تسجيل الطلب، صيفط لينا الاسم الكامل ديالك.');
         return;
       }
 
@@ -381,7 +415,7 @@ async function handleMessage(sock, msg) {
 
     const confirmMsg =
       `تم تسجيل طلبك بنجاح سي *${rawText}*! ✅\n\n` +
-      `غادي يتاصل بك التقني المعتمد ديال (*${session.result?.operator || 'IAM / Inwi'}*) في أقرب وقت لتحديد موعد التركيب المجاني والروتور 🚀.\n\n` +
+      `تسجلت المعلومات عند المساعد. المسؤول غادي يراجع إمكانية الربط والعرض معاك حسب التوفر. هاد التسجيل ماشي تأكيد نهائي للاشتراك أو موعد التركيب.\n\n` +
       `شكراً على ثقتك بنا 🤝!`;
 
     await safeReply(sock, msg, confirmMsg, realPhone);
@@ -392,21 +426,13 @@ async function handleMessage(sock, msg) {
 
   // ── CAS 3: COMPLETED SESSION
   if (session.step === 'COMPLETED') {
-    const llmReply = await askMultiTierLLM(rawText);
-    await safeReply(sock, msg,
-      `مرحباً بك مجدداً سي *${session.name || ''}*! 😊\n\n` +
-      `${llmReply.text}\n\n` +
-      `📍 إلا بغيتي تفحص موقع آخر، صيفط لينا Localisation Pin جديد في أي وقت!`,
-      realPhone
-    );
+    await answerQuestion(sock, msg, session, realPhone, rawText, '\n\n📍 تقدر تصيفط موقع جديد إلا بغيتي تفحص عنوان آخر.');
     return;
   }
 
   // ── CAS 4: INTELLIGENT MULTI-TIER LLM RESPONSE (4-TIER CASCADE)
   updateSession(realPhone || phone, { step: 'WAITING_LOCATION' });
-  const llmReply = await askMultiTierLLM(rawText);
-  recordLog(`🤖 LLM [Tier ${llmReply.tier} - ${llmReply.provider}] answered: "${llmReply.text.slice(0, 45)}..."`);
-  await safeReply(sock, msg, llmReply.text, realPhone);
+  await answerQuestion(sock, msg, session, realPhone, rawText);
 }
 
 // ============================================================================
@@ -544,13 +570,10 @@ async function startBot() {
   logger.info('🚀 Nexus-Telecom Bot starting...');
   botStatus = 'connecting';
 
-  // 1. AUTO-RESTORE SESSION FROM GITHUB CLOUD (max 3s timeout)
+  // Finish restoring auth before Baileys opens or writes these files.
   if (!fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
     logger.info('📦 Local auth empty. Checking GitHub cloud for saved session...');
-    await Promise.race([
-      restoreSessionFromGitHub(AUTH_DIR),
-      new Promise(r => setTimeout(r, 3000))
-    ]).catch(() => {});
+    await restoreSessionFromGitHub(AUTH_DIR).catch(() => {});
   }
 
   // Clean up any incomplete or unregistered local auth so Baileys generates a fresh QR cleanly
@@ -642,11 +665,20 @@ async function startBot() {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
     for (const msg of messages) {
       const rawText = msg.message?.conversation || msg.message?.extendedTextMessage?.text || (msg.message?.locationMessage ? '[LOCATION]' : '');
       recordLog(`📨 Upsert [${type}]: jid=${msg.key?.remoteJid} fromMe=${msg.key?.fromMe} text="${(rawText || '').slice(0, 30)}"`);
       try { await handleMessage(sock, msg); }
-      catch (e) { recordLog(`❌ Handler error: ${e.message}`); }
+      catch (e) {
+        recordLog(`❌ Handler error: ${e.message}`);
+        const jid = msg.key?.remoteJid;
+        if (jid && /@(s\.whatsapp\.net|lid)$/.test(jid) && !msg.key.fromMe) {
+          const phone = resolveClientPhone(jid, msg);
+          await requestHuman(sock, msg, getSession(phone || normalizePhone(jid)), phone, 'وقع خطأ تقني أثناء معالجة الرسالة').catch(() => {});
+          await safeReply(sock, msg, `وقع مشكل تقني فمعالجة الرسالة. عفاك تواصل مع المسؤول: https://wa.me/${ADMIN_PHONE}`, phone).catch(() => {});
+        }
+      }
     }
   });
 }
