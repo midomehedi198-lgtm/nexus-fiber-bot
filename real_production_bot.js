@@ -209,27 +209,27 @@ async function safeReply(sock, msg, text, targetPhone) {
 
   let delivered = false;
 
-  // PRIORITY 1: Send to Moroccan phone JID (@s.whatsapp.net) for 100% visible mobile delivery
-  if (pnJid) {
-    try {
-      const sent = await sock.sendMessage(pnJid, { text });
-      if (sent?.key?.id) botSentIds.add(sent.key.id);
-      recordLog(`✅ Delivered to phone ${pnJid}`);
-      delivered = true;
-    } catch (e1) {
-      recordLog(`⚠️ Phone delivery failed to ${pnJid}: ${e1.message}`);
-    }
-  }
-
-  // PRIORITY 2: Send to rawJid with quoted context
-  if (!delivered && rawJid) {
+  // Reply in the authenticated inbound conversation, including LID addresses.
+  if (rawJid) {
     try {
       const sent = await sock.sendMessage(rawJid, { text }, { quoted: msg });
       if (sent?.key?.id) botSentIds.add(sent.key.id);
-      recordLog(`✅ Delivered to rawJid ${rawJid}`);
+      recordLog(`📤 Reply accepted in original chat; id=${sent?.key?.id || 'unknown'} (delivery pending)`);
+      delivered = true;
+    } catch (e1) {
+      recordLog(`⚠️ Original chat send failed: ${e1.message}`);
+    }
+  }
+
+  // Fall back to a resolved phone only when the original chat send fails.
+  if (!delivered && pnJid && pnJid !== rawJid) {
+    try {
+      const sent = await sock.sendMessage(pnJid, { text });
+      if (sent?.key?.id) botSentIds.add(sent.key.id);
+      recordLog(`📤 Phone fallback accepted; id=${sent?.key?.id || 'unknown'} (delivery pending)`);
       delivered = true;
     } catch (e2) {
-      recordLog(`⚠️ rawJid send failed: ${e2.message}`);
+      recordLog(`⚠️ Phone fallback failed: ${e2.message}`);
     }
   }
 
@@ -612,6 +612,14 @@ async function startBot() {
     retryRequestDelayMs: 3000,
   });
   currentSock = sock;
+
+  sock.ev.on('messages.update', updates => {
+    for (const { key, update } of updates) {
+      if (!botSentIds.has(key?.id) || update?.status == null) continue;
+      const statuses = { 0: 'error', 1: 'pending', 2: 'server accepted', 3: 'delivered to device', 4: 'read', 5: 'played' };
+      recordLog(`📬 Reply receipt id=${key.id}: ${statuses[update.status] || update.status}`);
+    }
+  });
 
   sock.ev.on('creds.update', async () => {
     await saveCreds();

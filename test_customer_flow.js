@@ -35,6 +35,15 @@ async function main() {
   const msg = { key: { remoteJid: 'sample@lid' }, message: { conversation: 'need agent' } };
   assert.equal(await context.safeReply(sock, msg, 'reply', '212611111111'), true);
   assert.equal(sent.length, 1, 'one customer reply despite two possible JIDs');
+  assert.equal(sent[0].jid, 'sample@lid', 'reply targets original inbound LID');
+  const fallbackTargets = [];
+  const fallbackSock = { ...sock, sendMessage: async jid => {
+    fallbackTargets.push(jid);
+    if (jid.endsWith('@lid')) throw new Error('original address unavailable');
+    return { key: { id: 'fallback-test' } };
+  } };
+  assert.equal(await context.safeReply(fallbackSock, msg, 'reply', '212611111111'), true);
+  assert.deepEqual(fallbackTargets, ['sample@lid', '212611111111@s.whatsapp.net']);
   const session = { step: 'WAITING_NAME' };
   await context.answerQuestion(sock, msg, session, '212611111111', 'agent');
   assert.equal(sent.length, 3);
